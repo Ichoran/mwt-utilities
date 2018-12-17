@@ -71,7 +71,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     val filename = summary.toOk.mapNo(_ => s"No summary file in $who").?
     if (target.isZip) safe {
       val zf = new java.util.zip.ZipFile(who.toFile)
-        try {
+      try {
         val ze = zf.entries.asScala.find(_.getName == filename).toOk.mapNo(_ => s"Cannot find $filename in $who").?
         val reader = new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))
         reader.lines.forEach(line => f(line))
@@ -96,7 +96,21 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     override def stop() { f(myId, myVb.result()); myVb = null }
   })
 
-  def imagesWalk(decoder: String => Option[Array[Byte] => Unit]) = ???
+  def imagesWalk(decoder: String => Option[Array[Byte] => Unit]): Ok[String, Unit] = ???
+  def imagesDecoded(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
+    val ans = Array.newBuilder[(String, java.awt.image.BufferedImage)]
+    imagesWalk{ filename =>
+      val inLibrary: Option[Array[Byte] => Ok[String, java.awt.image.BufferedImage]] =
+        Contents.ImageReaders.library.get(filename).flatten.filter(_ => p(filename))
+      inLibrary.
+        map{ decoder: (Array[Byte] => Ok[String, java.awt.image.BufferedImage]) => 
+          decoder andThen (result => {
+            ans += ((filename, result.?))
+            ()
+          })
+        }
+    }.map(_ => ans.result())
+  }
 
   def otherWalk(interpreter: String => Option[Either[Array[Byte] => Unit, Vector[String] => Unit]]) = ???
 }
@@ -150,7 +164,29 @@ object Contents {
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }
     val parsedBase = parser(base).toOk.mapNo(_ => s"Cannot interpret base filename pattern $base").?
-    Yes(Contents(p, target, parsedBase, summary, blobs.sorted, notBlobOrSummary, Map()))
+    val (images, notBlobSummaryOrImage) =
+      notBlobOrSummary.partition(f => ImageReaders.library.exists{ case (k, _) => f endsWith k})
+    val otherMap = collection.mutable.AnyRefMap.empty[String, scala.collection.mutable.ArrayBuilder[String]]
+    notBlobSummaryOrImage.foreach{ f =>
+      val filename = clipOffDir(f)
+      if (filename startsWith base) {
+        val i = filename.lastIndexOf('.')
+        val key = if (i < 0) filename else filename.substring(i+1)
+        otherMap.getOrElseUpdate(key, Array.newBuilder[String]) += filename
+      }
+    }
+    Yes(Contents(p, target, parsedBase, summary, blobs.sorted, images.sorted, otherMap.mapValues(_.result().sorted).toMap))
+  }
+
+  object ImageReaders {
+    val library: Map[String, Option[Array[Byte] => Ok[String, java.awt.image.BufferedImage]]] = Map(
+      ".raw" -> None,
+      ".raw8" -> None,
+      ".tiff" -> None,
+      ".tif" -> None,
+      ".png" -> None,
+      ".dbde" -> None
+    )
   }
 
   object Implicits {
