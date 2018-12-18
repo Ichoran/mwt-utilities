@@ -179,14 +179,52 @@ object Contents {
   }
 
   object ImageReaders {
+    import java.awt._
+    import java.awt.image._
+    import java.awt.color._
+
     val library: Map[String, Option[Array[Byte] => Ok[String, java.awt.image.BufferedImage]]] = Map(
-      ".raw" -> None,
+      ".raw" -> Some(mwtFlavorRawReader _),
       ".raw8" -> None,
       ".tiff" -> None,
       ".tif" -> None,
       ".png" -> None,
       ".dbde" -> None
     )
+
+    def mwtFlavorRawReader(bytes: Array[Byte]): Ok[String, java.awt.image.BufferedImage] = {
+      val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer
+      if (buf.remaining < 2) return No(s"Input data too small to contain image size (${bytes.length} bytes)")
+      val nx = buf.get()
+      val ny = buf.get()
+      if (nx < 0 || ny < 0 || nx.toLong*ny.toLong >= Int.MaxValue) return No(s"Input data not a sensible size: $nx x $ny")
+      if (buf.remaining < nx*ny) return No(s"Insufficient elements for image ($nx x $ny claimed but have only ${buf.remaining})")
+      val data = new Array[Short](nx*ny)
+      buf.get(data)
+      val dbs = new DataBufferShort(data, data.length)
+      val ccm = new ComponentColorModel(ColorSpace getInstance ColorSpace.CS_GRAY, false, true, Transparency.OPAQUE, DataBuffer.TYPE_SHORT)
+      val wr = Raster.createWritableRaster(ccm.createCompatibleSampleModel(nx, ny), dbs, null)
+      Yes(new BufferedImage(ccm, wr, false, null))
+    }
+
+    def mwtFlavorRaw8Reader(bytes: Array[Byte]): Ok[String, java.awt.image.BufferedImage] = {
+      val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      if (buf.remaining < 4) return No(s"Input data too small to contain image size (${bytes.length} bytes)")
+      val nx = buf.getShort()
+      val ny = buf.getShort()
+      if (nx < 0 || ny < 0 || nx.toLong*ny.toLong >= Int.MaxValue) return No(s"Input data not a sensible size: $nx x $ny")
+      if (buf.remaining < nx*ny) return No(s"Insufficient elements for image ($nx x $ny claimed but have only ${buf.remaining})")
+      val dbs =
+        if (buf.remaining*0.8 > nx*ny) {
+          val data = new Array[Byte](nx*ny)
+          buf.get(data)
+          new DataBufferByte(data, data.length)
+        }
+        else new DataBufferByte(bytes, 4, nx*ny)
+      val ccm = new ComponentColorModel(ColorSpace getInstance ColorSpace.CS_GRAY, false, true, Transparency.OPAQUE, DataBuffer.TYPE_BYTE)
+      val wr = Raster.createWritableRaster(ccm.createCompatibleSampleModel(nx, ny), dbs, null)
+      Yes(new BufferedImage(ccm, wr, false, null))
+    }
   }
 
   object Implicits {
