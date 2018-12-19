@@ -11,15 +11,15 @@ import kse.eio._
 
 
 trait ImageAcceptor {
-  def canDecode(name: String): Boolean
+  def acceptable(name: String): Boolean
   def accept(bytes: Array[Byte]): Ok[String, Unit]
 }
 
 trait ImageDecoder[+A] { self =>
-  def canDecode(name: String): Boolean
+  def decodable(name: String): Boolean
   def decode(bytes: Array[Byte]): Ok[String, A]
   def asAcceptor(callback: A => Unit): ImageAcceptor = new ImageAcceptor {
-    def canDecode(name: String): Boolean = self.canDecode(name)
+    def acceptable(name: String): Boolean = self.decodable(name)
     def accept(bytes: Array[Byte]): Ok[String, Unit] = self.decode(bytes) match {
       case Yes(y) => callback(y); Ok.UnitYes
       case n: No[String] => n
@@ -27,9 +27,10 @@ trait ImageDecoder[+A] { self =>
   }
 }
 
+
 abstract class ImageByExtension(val extension: String)
 extends ImageDecoder[java.awt.image.BufferedImage] {
-  def canDecode(name: String) = 
+  def decodable(name: String) = 
     if (extension.length > 0 && extension.charAt(0) != '.') name startsWith ("."+extension)
     else name startsWith extension
   def asEntry: (String, Option[ImageByExtension]) =
@@ -45,7 +46,7 @@ object ImageDecoder {
   def graySpace = ColorSpace getInstance ColorSpace.CS_GRAY
 
   val DoNotDecode = new ImageAcceptor {
-    def canDecode(name: String) = false
+    def acceptable(name: String) = false
     def accept(bytes: Array[Byte]) =
       throw new IllegalArgumentException("Tried to decode something despite refusal to decode anything")
   }

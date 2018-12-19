@@ -46,14 +46,17 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     override def stop() { f(myId, myVb.result()); myVb = null }
   })
 
-  def imagesWalk(decoder: String => ImageAcceptor): Ok[String, Unit] = 
+  def imagesWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = 
     if (target.isZip) safe {
       ???
     }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
     else safe {
       aFor(images){ (image, i) =>
+        val acceptor = dispatch(image)
+        if (acceptor.acceptable(image)) {
+          acceptor.accept(Files.readAllBytes(who resolve image)).?
+        }
       }
-      ???
     }.mapNo(e => s"Could not successfully process images in $who:\n${e.explain(10)}\n")
   def imagesDecoded(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
     val ans = Array.newBuilder[(String, java.awt.image.BufferedImage)]
