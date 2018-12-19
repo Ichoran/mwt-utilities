@@ -9,56 +9,6 @@ import scala.collection.JavaConverters._
 import kse.flow._
 import kse.eio._
 
-final case class OutputTarget(name: String, when: Instant, prefix: Option[String]) {
-  def isZip = name endsWith ".zip"
-}
-object OutputTarget {
-  def from(s: String, debug: Boolean = true): Ok[String, OutputTarget] = s.split('_').pipe{ parts =>
-    def no(why: => String) = No(if (debug) why else "Misformatted")
-
-    if (parts.length < 2) return no(s"Too few parts (${parts.length})")
-    val date = parts(parts.length-2)
-    val time = parts(parts.length-1).take(6)
-    if (date.length != 8) return no(s"Date chunk is not 8 chars long: $date")
-    if (time.length < 6) return no(s"Time chunk is less than 6 chars: $time")
-    nFor(date.length){ i => val c = date.charAt(i); if (c < '0' || c > '9') return no("Date char #${i+1} is not a digit: $c") }
-    nFor(time.length){ i => val c = time.charAt(i); if (c < '0' || c > '9') return no("Time char #${i+1} is not a digit: $c") }
-    val zoned = parts(parts.length-1).pipe{ bit =>
-      if (bit.length == 6) false
-      else if (bit.length == 7) {
-        if (bit.charAt(6) == 'Z') true else return no("Last part right length to end with Z but ends with ${bit.charAt(6)}")
-      }
-      else if (bit.length == 10) {
-        if (bit endsWith ".zip") false else return no("Last part right length to end with .zip but ends with ${bit.drop(6)}")
-      }
-      else if (bit.length == 11) {
-        if (bit endsWith "Z.zip") true else return no("Last part right length to end with Z.zip but ends with ${bit.drop(6)}")
-      }
-      else return No("Wrong size for last part (${bit.length})")
-    }
-    val instant = safe {
-      val y = date.substring(0, 4).toInt
-      val mo = date.substring(4, 6).toInt
-      val d = date.substring(6, 8).toInt
-      val h = time.substring(0, 2).toInt
-      val min = time.substring(2, 4).toInt
-      val sec = time.substring(4, 6).toInt
-      Instant from ZonedDateTime.of(y, mo, d, h, min, sec, 0, if (zoned) ZoneOffset.UTC else ZoneId.systemDefault)
-    }.mapNo(e => s"Error parsing date:\n${e.explain()}\n").?
-    val prefix = (
-      if (parts.length > 2) Some(s.dropRight(2 + date.length + parts(parts.length-1).length))
-      else None
-    )
-    Yes(new OutputTarget(s, instant, prefix))
-  }
-
-  def from(f: File): Ok[String, OutputTarget] = from(f.getName)
-  def from(f: File, debug: Boolean): Ok[String, OutputTarget] = from(f.getName, debug)
-
-  def from(p: Path): Ok[String, OutputTarget] = from(p.getFileName.toString)
-  def from(p: Path, debug: Boolean): Ok[String, OutputTarget] = from(p.getFileName.toString, debug)
-}
-
 
 abstract class BlobVisitor {
   def start(id: Int): Boolean = true
@@ -96,19 +46,25 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     override def stop() { f(myId, myVb.result()); myVb = null }
   })
 
-  def imagesWalk(decoder: String => Option[Array[Byte] => Unit]): Ok[String, Unit] = ???
+  def imagesWalk(decoder: String => ImageAcceptor): Ok[String, Unit] = 
+    if (target.isZip) safe {
+      ???
+    }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
+    else safe {
+      aFor(images){ (image, i) =>
+      }
+      ???
+    }.mapNo(e => s"Could not successfully process images in $who:\n${e.explain(10)}\n")
   def imagesDecoded(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
     val ans = Array.newBuilder[(String, java.awt.image.BufferedImage)]
     imagesWalk{ filename =>
-      val inLibrary: Option[Array[Byte] => Ok[String, java.awt.image.BufferedImage]] =
-        Contents.ImageReaders.library.get(filename).flatten.filter(_ => p(filename))
-      inLibrary.
-        map{ decoder: (Array[Byte] => Ok[String, java.awt.image.BufferedImage]) => 
-          decoder andThen (result => {
-            ans += ((filename, result.?))
-            ()
-          })
-        }
+      if (!p(filename)) ImageDecoder.DoNotDecode
+      val i = filename.lastIndexOf('.')
+      val key = if (i < 0) "" else filename.substring(i)
+      ImageDecoder.library.get(key).flatten match {
+        case Some(d) => d.asAcceptor(img => ans += (filename -> img))
+        case None    => ImageDecoder.DoNotDecode
+      }
     }.map(_ => ans.result())
   }
 
@@ -130,6 +86,15 @@ object Contents {
       val i = s.lastIndexOf('.')
       if (i < 0) s else s.substring(0, i)
     }
+  def extractExt(s: String): String = {
+    val i = s.lastIndexOf('.')
+    if (i < 0) ""
+    else {
+      val j = s.indexOf('/', i)
+      val k = s.indexOf('\\', i)
+      if (j < 0 || k < 0) "" else s.substring(i)
+    }
+  }
   def from[A](p: Path, parser: String => Option[A], debug: Boolean = true): Ok[String, Contents[A]] = {
     val target = OutputTarget.from(p, true).mapNo(e => s"Not a MWT output target:\n$e").?
     val listing = safe {
@@ -165,7 +130,7 @@ object Contents {
     }
     val parsedBase = parser(base).toOk.mapNo(_ => s"Cannot interpret base filename pattern $base").?
     val (images, notBlobSummaryOrImage) =
-      notBlobOrSummary.partition(f => ImageReaders.library.exists{ case (k, _) => f endsWith k})
+      notBlobOrSummary.partition(f => ImageDecoder.library.contains(extractExt(f)))
     val otherMap = collection.mutable.AnyRefMap.empty[String, scala.collection.mutable.ArrayBuilder[String]]
     notBlobSummaryOrImage.foreach{ f =>
       val filename = clipOffDir(f)
@@ -176,55 +141,6 @@ object Contents {
       }
     }
     Yes(Contents(p, target, parsedBase, summary, blobs.sorted, images.sorted, otherMap.mapValues(_.result().sorted).toMap))
-  }
-
-  object ImageReaders {
-    import java.awt._
-    import java.awt.image._
-    import java.awt.color._
-
-    val library: Map[String, Option[Array[Byte] => Ok[String, java.awt.image.BufferedImage]]] = Map(
-      ".raw" -> Some(mwtFlavorRawReader _),
-      ".raw8" -> None,
-      ".tiff" -> None,
-      ".tif" -> None,
-      ".png" -> None,
-      ".dbde" -> None
-    )
-
-    def mwtFlavorRawReader(bytes: Array[Byte]): Ok[String, java.awt.image.BufferedImage] = {
-      val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer
-      if (buf.remaining < 2) return No(s"Input data too small to contain image size (${bytes.length} bytes)")
-      val nx = buf.get()
-      val ny = buf.get()
-      if (nx < 0 || ny < 0 || nx.toLong*ny.toLong >= Int.MaxValue) return No(s"Input data not a sensible size: $nx x $ny")
-      if (buf.remaining < nx*ny) return No(s"Insufficient elements for image ($nx x $ny claimed but have only ${buf.remaining})")
-      val data = new Array[Short](nx*ny)
-      buf.get(data)
-      val dbs = new DataBufferShort(data, data.length)
-      val ccm = new ComponentColorModel(ColorSpace getInstance ColorSpace.CS_GRAY, false, true, Transparency.OPAQUE, DataBuffer.TYPE_SHORT)
-      val wr = Raster.createWritableRaster(ccm.createCompatibleSampleModel(nx, ny), dbs, null)
-      Yes(new BufferedImage(ccm, wr, false, null))
-    }
-
-    def mwtFlavorRaw8Reader(bytes: Array[Byte]): Ok[String, java.awt.image.BufferedImage] = {
-      val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-      if (buf.remaining < 4) return No(s"Input data too small to contain image size (${bytes.length} bytes)")
-      val nx = buf.getShort()
-      val ny = buf.getShort()
-      if (nx < 0 || ny < 0 || nx.toLong*ny.toLong >= Int.MaxValue) return No(s"Input data not a sensible size: $nx x $ny")
-      if (buf.remaining < nx*ny) return No(s"Insufficient elements for image ($nx x $ny claimed but have only ${buf.remaining})")
-      val dbs =
-        if (buf.remaining*0.8 > nx*ny) {
-          val data = new Array[Byte](nx*ny)
-          buf.get(data)
-          new DataBufferByte(data, data.length)
-        }
-        else new DataBufferByte(bytes, 4, nx*ny)
-      val ccm = new ComponentColorModel(ColorSpace getInstance ColorSpace.CS_GRAY, false, true, Transparency.OPAQUE, DataBuffer.TYPE_BYTE)
-      val wr = Raster.createWritableRaster(ccm.createCompatibleSampleModel(nx, ny), dbs, null)
-      Yes(new BufferedImage(ccm, wr, false, null))
-    }
   }
 
   object Implicits {
