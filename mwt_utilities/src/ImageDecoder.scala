@@ -39,7 +39,7 @@ extends ImageDecoder[java.awt.image.BufferedImage] {
 
 
 object ImageDecoder {
-  import java.awt._
+  import java.awt.Transparency
   import java.awt.image._
   import java.awt.color._
 
@@ -69,9 +69,8 @@ object ImageDecoder {
   }
   val mwtRawDecoder: ImageByExtension = new MwtRawDecoder()
 
-
   private class MwtRaw8Decoder() extends ImageByExtension(".raw8") {
-    def decode(bytes: Array[Byte]): Ok[String, java.awt.image.BufferedImage] = {
+    def decode(bytes: Array[Byte]): Ok[String, BufferedImage] = {
       val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
       if (buf.remaining < 4) return No(s"Input data too small to contain image size (${bytes.length} bytes)")
       val nx = buf.getShort()
@@ -88,12 +87,23 @@ object ImageDecoder {
   }
   val mwtRaw8Decoder: ImageByExtension = new MwtRaw8Decoder()
 
+
+  trait ImageFromImageIO extends ImageDecoder[BufferedImage] {
+    def decode(bytes: Array[Byte]): Ok[String, BufferedImage] = safe {
+      val bais = new ByteArrayInputStream(bytes)
+      javax.imageio.ImageIO.read(bais).
+        tap(img => if (img == null) return No(s"No decoder available in ImageIO"))
+    }.mapNo(e => s"Failure to decode with ImageIO:\n${e.explain(64)}")
+  }
+  private class PngDecoder() extends ImageByExtension(".png") with ImageFromImageIO {}
+  val pngDecoder: ImageByExtension = new PngDecoder()
+
   val library: Map[String, Option[ImageByExtension]] = Map(
     mwtRawDecoder.asEntry,
     mwtRaw8Decoder.asEntry,
     ".tiff" -> None,
     ".tif" -> None,
-    ".png" -> None,
+    pngDecoder.asEntry,
     ".dbde" -> None
   )
 }
