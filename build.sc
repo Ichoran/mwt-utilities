@@ -13,6 +13,7 @@ trait Common extends ScalaModule {
   )
 
   def ivyDeps = Agg(
+    ivy"com.twelvemonkeys.imageio:imageio-tiff:3.4.1",
     ivy"com.github.ichoran::kse:0.8-SNAPSHOT"
   )
 }

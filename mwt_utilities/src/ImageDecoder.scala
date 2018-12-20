@@ -97,12 +97,15 @@ object ImageDecoder {
   }
   private class PngDecoder() extends ImageByExtension(".png") with ImageFromImageIO {}
   val pngDecoder: ImageByExtension = new PngDecoder()
+  private class TiffDecoder(extension: String) extends ImageByExtension(extension) with ImageFromImageIO {}
+  val tiffDecoder: ImageByExtension = new TiffDecoder(".tiff")
+  val tifDecoder: ImageByExtension = new TiffDecoder(".tif")
 
   val library: Map[String, Option[ImageByExtension]] = Map(
     mwtRawDecoder.asEntry,
     mwtRaw8Decoder.asEntry,
-    ".tiff" -> None,
-    ".tif" -> None,
+    tiffDecoder.asEntry,
+    tifDecoder.asEntry,
     pngDecoder.asEntry,
     ".dbde" -> None
   )
