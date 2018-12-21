@@ -17,27 +17,61 @@ abstract class BlobVisitor {
 }
 
 case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
-  def summaryWalk[U](f: String => U): Ok[String, Unit] = {
-    val filename = summary.toOk.mapNo(_ => s"No summary file in $who").?
-    if (target.isZip) safe {
-      val zf = new java.util.zip.ZipFile(who.toFile)
-      try {
-        val ze = zf.entries.asScala.find(_.getName == filename).toOk.mapNo(_ => s"Cannot find $filename in $who").?
-        val reader = new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))
-        reader.lines.forEach(line => f(line))
-      }
-      finally { zf.close }
-    }.mapNo(e => s"Could not extract $filename from $who:\n${e.explain(12)}\n")
+  def summaryWalk[U](f: String => U): Ok[String, Unit] =
+    if (summary.isEmpty) No(s"No summary file in $who")
     else safe {
-      Files.lines(who resolve filename).forEach(line => f(line))
-    }.mapNo(e => s"Could not read $filename in $who:\n${e.explain(10)}\n")
-  }
+      val filename = summary.get
+      if (target.isZip) {
+        val zf = new java.util.zip.ZipFile(who.toFile)
+        try {
+          val ze = zf.entries.asScala.find(_.getName == filename).toOk.mapNo(_ => s"Cannot find $filename in $who").?
+          val reader = new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))
+          reader.lines.forEach(line => f(line))
+        }
+        finally { zf.close }
+      }
+      else Files.lines(who resolve filename).forEach(line => f(line))
+    }.mapNo(e => s"Could not read ${summary.get} in $who:\n${e.explain(10)}\n")
   def summaryLines: Ok[String, Vector[String]] = {
     val vb = Vector.newBuilder[String]
     summaryWalk{ vb += _ }.map(_ => vb.result())
   }
 
-  def blobsVisit(visitor: BlobVisitor): Ok[String, Unit] = ???
+  private def getIdFromBlobName(name: String): Ok[String, Int] = ???
+
+  private def getIdFromBlobsLine(line: String, file: String, n: Int): Ok[String, Int] = ???
+
+  def blobsVisit(visitor: BlobVisitor): Ok[String, Unit] = 
+    safe {
+      val seen = collection.mutable.Set.empty[Int]
+      if (target.isZip) ???
+      else {
+        blobs.foreach{ blob =>
+          if (blob endsWith ".blob") {
+            val id = getIdFromBlobName(blob).?
+            if (visitor.start(id)) {
+              Files.lines(who resolve blob).forEach(visitor accept _)
+              visitor.stop()
+            }
+          }
+          else {
+            var n = 0
+            var id = 0
+            var visit = false
+            Files.lines(who resolve blob).forEach{ line =>
+              n += 1
+              if (line.length > 0 && line.charAt(0) == '%') {
+                if (visit) visitor.stop()
+                id = getIdFromBlobsLine(line, blob, n).?
+                visit = visitor.start(id)
+              }
+              else if (line.length > 0 && visit) visitor accept line
+            }
+            if (visit) visitor.stop()
+          }
+        }
+      }
+    }.mapNo(e => s"Failed to process blobs from $who:\n${e.explain(16)}\n")
   def blobLinesWalk[U](f: (Int, Vector[String]) => U) = blobsVisit(new BlobVisitor {
     private var myId: Int = -1
     private var myVb: collection.mutable.Builder[String, Vector[String]] = null
@@ -47,31 +81,33 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
   })
 
   def imagesWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = 
-    if (target.isZip) safe {
-      val imageSet = images.toSet
-      val zf = new java.util.zip.ZipFile(who.toFile)
-      try {
-        val zei = zf.entries.asScala
-        while (zei.hasNext) { 
-          val ze = zei.next
-          if (imageSet contains ze.getName) {
-            val acceptor = dispatch(ze.getName)
-            if (acceptor.acceptable(ze.getName)) {
-              acceptor.accept(zf.getInputStream(ze).gulp.?)
+    safe {
+      if (target.isZip) {
+        val imageSet = images.toSet
+        val zf = new java.util.zip.ZipFile(who.toFile)
+        try {
+          val zei = zf.entries.asScala
+          while (zei.hasNext) { 
+            val ze = zei.next
+            if (imageSet contains ze.getName) {
+              val acceptor = dispatch(ze.getName)
+              if (acceptor.acceptable(ze.getName)) {
+                acceptor.accept(zf.getInputStream(ze).gulp.?)
+              }
             }
           }
         }
+        finally { zf.close }
       }
-      finally { zf.close }
-    }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
-    else safe {
-      aFor(images){ (image, i) =>
-        val acceptor = dispatch(image)
-        if (acceptor.acceptable(image)) {
-          acceptor.accept(Files.readAllBytes(who resolve image)).?
+      else {
+        aFor(images){ (image, i) =>
+          val acceptor = dispatch(image)
+          if (acceptor.acceptable(image)) {
+            acceptor.accept(Files.readAllBytes(who resolve image)).?
+          }
         }
       }
-    }.mapNo(e => s"Could not successfully process images in $who:\n${e.explain(10)}\n")
+    }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
   def imagesDecoded(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
     val ans = Array.newBuilder[(String, java.awt.image.BufferedImage)]
     imagesWalk{ filename =>
@@ -137,7 +173,7 @@ object Contents {
       case one :: Nil => Some(one)
       case one :: uhoh => return No(s"Too many summary files: $one ${uhoh.mkString(" ")}")
     }
-    val (blobs, notBlobOrSummary) = notSummaries.partition(f => f.endsWith("blobs") || f.endsWith("blob"))
+    val (blobs, notBlobOrSummary) = notSummaries.partition(f => f.endsWith(".blobs") || f.endsWith(".blob"))
     val sBase = summary.map(x => extractBase(clipOffDir(x))).toList
     val bBases = blobs.map(x => extractBase(clipOffDir(x), blobRules = true)).toList
     val base = ((sBase ::: bBases).toSet.toList: List[String]) match {
