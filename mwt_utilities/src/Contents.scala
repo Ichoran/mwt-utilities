@@ -48,7 +48,21 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
 
   def imagesWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = 
     if (target.isZip) safe {
-      ???
+      val imageSet = images.toSet
+      val zf = new java.util.zip.ZipFile(who.toFile)
+      try {
+        val zei = zf.entries.asScala
+        while (zei.hasNext) { 
+          val ze = zei.next
+          if (imageSet contains ze.getName) {
+            val acceptor = dispatch(ze.getName)
+            if (acceptor.acceptable(ze.getName)) {
+              acceptor.accept(zf.getInputStream(ze).gulp.?)
+            }
+          }
+        }
+      }
+      finally { zf.close }
     }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
     else safe {
       aFor(images){ (image, i) =>
@@ -95,7 +109,7 @@ object Contents {
     else {
       val j = s.indexOf('/', i)
       val k = s.indexOf('\\', i)
-      if (j < 0 || k < 0) "" else s.substring(i)
+      if (j >= 0 || k >= 0) "" else s.substring(i)
     }
   }
   def from[A](p: Path, parser: String => Option[A], debug: Boolean = true): Ok[String, Contents[A]] = {

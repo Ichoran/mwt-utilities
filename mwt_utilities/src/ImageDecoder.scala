@@ -30,9 +30,9 @@ trait ImageDecoder[+A] { self =>
 
 abstract class ImageByExtension(val extension: String)
 extends ImageDecoder[java.awt.image.BufferedImage] {
-  def decodable(name: String) = 
-    if (extension.length > 0 && extension.charAt(0) != '.') name startsWith ("."+extension)
-    else name startsWith extension
+  def decodable(name: String) =
+    if (extension.length > 0 && extension.charAt(0) != '.') name endsWith ("."+extension)
+    else name endsWith extension
   def asEntry: (String, Option[ImageByExtension]) =
     (if (extension.length > 0 && extension.charAt(0) != '.') "." + extension else extension, Some(this))
 }
