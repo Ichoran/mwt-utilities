@@ -3,6 +3,7 @@ package mwt.utilities
 import java.io._
 import java.nio.file._
 import java.time._
+import java.util.zip._
 
 import scala.collection.JavaConverters._
 
@@ -22,11 +23,10 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     else safe {
       val filename = summary.get
       if (target.isZip) {
-        val zf = new java.util.zip.ZipFile(who.toFile)
+        val zf = new ZipFile(who.toFile)
         try {
           val ze = zf.entries.asScala.find(_.getName == filename).toOk.mapNo(_ => s"Cannot find $filename in $who").?
-          val reader = new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))
-          reader.lines.forEach(line => f(line))
+          zf.getInputStream(ze).reader.lines.forEach(line => f(line))
         }
         finally { zf.close }
       }
@@ -74,7 +74,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
       val seen = collection.mutable.Set.empty[Int]
       if (target.isZip) {
         val blobSet = blobs.toSet
-        val zf = new java.util.zip.ZipFile(who.toFile)
+        val zf = new ZipFile(who.toFile)
         try {
           val zei = zf.entries.asScala
           while (zei.hasNext) { 
@@ -82,7 +82,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
             if (blobSet contains ze.getName) {
               if (ze.getName endsWith ".blob") {
                 if (visitor.start(getIdFromBlobName(ze.getName, seen).?)) {
-                  (new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))).lines.forEach(visitor accept _)
+                  zf.getInputStream(ze).reader.lines.forEach(visitor accept _)
                   visitor.stop()
                 }
               }
@@ -90,7 +90,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
                 var n = 0
                 var id = 0
                 var visit = false
-                (new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))).lines.forEach{ line =>
+                zf.getInputStream(ze).reader.lines.forEach{ line =>
                   n += 1
                   if (line.length > 0 && line.charAt(0) == '%') {
                     if (visit) visitor.stop()
@@ -145,7 +145,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     safe {
       if (target.isZip) {
         val imageSet = images.toSet
-        val zf = new java.util.zip.ZipFile(who.toFile)
+        val zf = new ZipFile(who.toFile)
         try {
           val zei = zf.entries.asScala
           while (zei.hasNext) { 
@@ -182,7 +182,44 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     }.map(_ => ans.result())
   }
 
-  def otherWalk(interpreter: String => Option[Either[Array[Byte] => Unit, Vector[String] => Unit]]) = ???
+  def otherWalk(interpreter: String => Option[Either[(String, Array[Byte]) => Unit, (String, Vector[String]) => Unit]]): Ok[String, Unit] = 
+    safe {
+      // Simplifies the inner logic if we can have these out here
+      // and just not use them if it's not a zip file.
+      // Using null instead of Option because why not?
+      var zf: ZipFile = null
+      var zes: Array[ZipEntry] = null
+      try {
+        for {
+          (ext, files) <- others
+          acceptor <- interpreter(ext)
+        } {
+          if (target.isZip) {
+            val fileSet = files.toSet
+            if (zf eq null)  zf = new ZipFile(who.toFile)
+            if (zes eq null) zes = zf.entries.asScala.toArray
+            zes.foreach{ ze =>
+              if (fileSet contains ze.getName) acceptor match {
+                case Left(fab)  => fab(ze.getName, zf.getInputStream(ze).gulp.?)
+                case Right(fvs) => fvs(ze.getName, zf.getInputStream(ze).slurp.?)
+              }
+            }
+          }
+          else {
+            aFor(files){ (file, i) => acceptor match {
+              case Left(fab)  => fab(file, Files.readAllBytes(who resolve file))
+              case Right(fvs) => 
+                fvs(file, { 
+                  val vb = Vector.newBuilder[String]
+                  Files.lines(who resolve file).forEach(vb += _)
+                  vb.result
+                })
+            }
+          }}
+        }
+      }
+      finally { if (zf ne null) zf.close }
+    }.mapNo(e => s"Failed to process other files from $who:\n${e.explain(24)}")
 }
 object Contents {
   def clipOffDir(s: String): String = {
@@ -214,7 +251,7 @@ object Contents {
     val listing = safe {
       val ab = Array.newBuilder[String]
       if (target.isZip) {
-        val zf = new java.util.zip.ZipFile(p.toFile)
+        val zf = new ZipFile(p.toFile)
         try {
           zf.entries.asScala.
             filterNot(_.isDirectory).
@@ -251,7 +288,7 @@ object Contents {
       if (filename startsWith base) {
         val i = filename.lastIndexOf('.')
         val key = if (i < 0) filename else filename.substring(i+1)
-        otherMap.getOrElseUpdate(key, Array.newBuilder[String]) += filename
+        otherMap.getOrElseUpdate(key, Array.newBuilder[String]) += f
       }
     }
     Yes(Contents(p, target, parsedBase, summary, blobs.sorted, images.sorted, otherMap.mapValues(_.result().sorted).toMap))
