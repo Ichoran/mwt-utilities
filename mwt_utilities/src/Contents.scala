@@ -37,19 +37,79 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
     summaryWalk{ vb += _ }.map(_ => vb.result())
   }
 
-  private def getIdFromBlobName(name: String): Ok[String, Int] = ???
+  private def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
+    val i = name.lastIndexOf('.')
+    val j = name.indexOf('_')
+    if (i < 0) No(s"$name is not a blob file")
+    else if (j < 0 || j >= i-2) No(s"$name does not end with _<number>.blob")
+    else {
+      val token = name.substring(j+1, i)
+      Grok(token).oI match {
+        case None    => No(s"$token in blob file $name is not a number")
+        case Some(x) => 
+          if (x <= 0)       No(s"Blob number $x in $name is out of range (must be a positive integer)")
+          else if (seen(x)) No(s"Blob number $x in $name appeared earlier; numbers must be unique")
+          else { seen += x; Yes(x) }
+      }
+    }
+  }
 
-  private def getIdFromBlobsLine(line: String, file: String, n: Int): Ok[String, Int] = ???
+  private def getIdFromBlobsLine(line: String, file: String, n: Int, seen: collection.mutable.Set[Int]): Ok[String, Int] =
+    if (line.isEmpty || line(0) != '%') No(s"Line $n in $file does not start with %: $line")
+    else {
+      val g = Grok(line)
+      if (g.trySkip(1) < 1) No(s"Line $n in $file needs a blob ID after the %: $line")
+      else g.oI match {
+        case None    => No(s"Line $n in $file needs a number after the %: $line")
+        case Some(x) => 
+          if (x <= 0)       No(s"Line $n in $file has an out-of range blob number, $x (must be a positive integer)")
+          else if (seen(x)) No(s"Line $n in $file has blob number $x which appeared earlier; numbers must be unique")
+          else { seen += x; Yes(x) }
+      }
+    }
 
-  def blobsVisit(visitor: BlobVisitor): Ok[String, Unit] = 
+  def blobsVisit(visitor: BlobVisitor): Ok[String, Unit] = {
+    val seen = collection.mutable.Set.empty[Int]
     safe {
       val seen = collection.mutable.Set.empty[Int]
-      if (target.isZip) ???
+      if (target.isZip) {
+        val blobSet = blobs.toSet
+        val zf = new java.util.zip.ZipFile(who.toFile)
+        try {
+          val zei = zf.entries.asScala
+          while (zei.hasNext) { 
+            val ze = zei.next
+            if (blobSet contains ze.getName) {
+              if (ze.getName endsWith ".blob") {
+                if (visitor.start(getIdFromBlobName(ze.getName, seen).?)) {
+                  (new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))).lines.forEach(visitor accept _)
+                  visitor.stop()
+                }
+              }
+              else {
+                var n = 0
+                var id = 0
+                var visit = false
+                (new BufferedReader(new InputStreamReader(zf.getInputStream(ze)))).lines.forEach{ line =>
+                  n += 1
+                  if (line.length > 0 && line.charAt(0) == '%') {
+                    if (visit) visitor.stop()
+                    id = getIdFromBlobsLine(line, ze.getName, n, seen).?
+                    visit = visitor.start(id)
+                  }
+                  else if (line.length > 0 && visit) visitor accept line
+                }
+                if (visit) visitor.stop()
+              }
+            }
+          }
+        }
+        finally { zf.close }
+      }
       else {
         blobs.foreach{ blob =>
           if (blob endsWith ".blob") {
-            val id = getIdFromBlobName(blob).?
-            if (visitor.start(id)) {
+            if (visitor.start(getIdFromBlobName(blob, seen).?)) {
               Files.lines(who resolve blob).forEach(visitor accept _)
               visitor.stop()
             }
@@ -62,7 +122,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
               n += 1
               if (line.length > 0 && line.charAt(0) == '%') {
                 if (visit) visitor.stop()
-                id = getIdFromBlobsLine(line, blob, n).?
+                id = getIdFromBlobsLine(line, blob, n, seen).?
                 visit = visitor.start(id)
               }
               else if (line.length > 0 && visit) visitor accept line
@@ -72,6 +132,7 @@ case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option
         }
       }
     }.mapNo(e => s"Failed to process blobs from $who:\n${e.explain(16)}\n")
+  }
   def blobLinesWalk[U](f: (Int, Vector[String]) => U) = blobsVisit(new BlobVisitor {
     private var myId: Int = -1
     private var myVb: collection.mutable.Builder[String, Vector[String]] = null
