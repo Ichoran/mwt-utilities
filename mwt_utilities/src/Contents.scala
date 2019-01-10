@@ -17,7 +17,7 @@ abstract class BlobVisitor {
   def stop(): Unit = {}
 }
 
-case class Contents[A](who: Path, target: OutputTarget, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
+case class Contents[A](who: Path, target: OutputTarget, baseString: String, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
   def summaryWalk[U](f: String => U): Ok[String, Unit] =
     if (summary.isEmpty) No(s"No summary file in $who")
     else safe {
@@ -246,7 +246,7 @@ object Contents {
       if (j >= 0 || k >= 0) "" else s.substring(i)
     }
   }
-  def from[A](p: Path, parser: String => Option[A], debug: Boolean = true): Ok[String, Contents[A]] = {
+  def from[A](p: Path, parser: String => Ok[String, A] = (s: String) => Ok.UnitYes, debug: Boolean = true): Ok[String, Contents[A]] = {
     val target = OutputTarget.from(p, true).mapNo(e => s"Not a MWT output target:\n$e").?
     val listing = safe {
       val ab = Array.newBuilder[String]
@@ -279,7 +279,7 @@ object Contents {
       case b :: Nil => b
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }
-    val parsedBase = parser(base).toOk.mapNo(_ => s"Cannot interpret base filename pattern $base").?
+    val parsedBase = parser(base).mapNo(e => s"Cannot interpret base filename pattern $base\n  $e").?
     val (images, notBlobSummaryOrImage) =
       notBlobOrSummary.partition(f => ImageDecoder.library.contains(extractExt(f)))
     val otherMap = collection.mutable.AnyRefMap.empty[String, scala.collection.mutable.ArrayBuilder[String]]
@@ -291,7 +291,7 @@ object Contents {
         otherMap.getOrElseUpdate(key, Array.newBuilder[String]) += f
       }
     }
-    Yes(Contents(p, target, parsedBase, summary, blobs.sorted, images.sorted, otherMap.mapValues(_.result().sorted).toMap))
+    Yes(Contents(p, target, base, parsedBase, summary, blobs.sorted, images.sorted, otherMap.mapValues(_.result().sorted).toMap))
   }
 
   object Implicits {
