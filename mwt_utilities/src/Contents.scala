@@ -17,6 +17,24 @@ abstract class BlobVisitor {
   def stop(): Unit = {}
 }
 
+abstract class ContentsTransformer[A] {
+  def start(everything: Contents[A]): Option[Path] =
+    if (everything.target.isZip) None
+    else Some((everything.who.toFile % "zip").toPath)
+  def blobsFirst(): Boolean = true
+  def noSummary(): Option[Stored] = None
+  def summary(): FromStore[Option[Stored]] = FromStore.All(x => Some(x))
+  def repackBlobs(): Boolean
+  def blob(): Int => Option[FromStore.Text[Option[Stored.Text]]] = _ => Some(FromStore.Text(x => Some(x)))
+  def stopBlobs(): Map[Int, Stored.Text] = Map.empty
+  def other(): String => Option[String => FromStore[Option[Stored]]] = _ => Some(_ => FromStore.Binary(x => Some(x)))
+  def stop(): Map[String, () => (String, Stored)] = Map.empty
+}
+object ContentsTransformer {
+  def default[A]: ContentsTransformer[A] = new ContentsTransformer[A] { def repackBlobs() = false }
+}
+
+
 case class Contents[A](who: Path, target: OutputTarget, baseString: String, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
   def summaryWalk[U](f: String => U): Ok[String, Unit] =
     if (summary.isEmpty) No(s"No summary file in $who")
@@ -32,9 +50,9 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       else Files.lines(who resolve filename).forEach(line => f(line))
     }.mapNo(e => s"Could not read ${summary.get} in $who:\n${e.explain(10)}\n")
-  def summaryLines: Ok[String, Vector[String]] = {
+  def summaryLines: Ok[String, Stored.Text] = {
     val vb = Vector.newBuilder[String]
-    summaryWalk{ vb += _ }.map(_ => vb.result())
+    summaryWalk{ vb += _ }.map(_ => Stored.Text(vb.result()))
   }
 
   private def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
@@ -133,12 +151,12 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
     }.mapNo(e => s"Failed to process blobs from $who:\n${e.explain(16)}\n")
   }
-  def blobLinesWalk[U](f: (Int, Vector[String]) => U) = blobsVisit(new BlobVisitor {
+  def blobLinesWalk[U](f: (Int, Stored.Text) => U) = blobsVisit(new BlobVisitor {
     private var myId: Int = -1
     private var myVb: collection.mutable.Builder[String, Vector[String]] = null
     override def start(id: Int) = { myId = id; myVb = Vector.newBuilder[String]; true }
     def accept(line: String) = { myVb += line; true }
-    override def stop() { f(myId, myVb.result()); myVb = null }
+    override def stop() { f(myId, Stored.Text(myVb.result())); myVb = null }
   })
 
   def imagesWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = 
@@ -182,7 +200,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     }.map(_ => ans.result())
   }
 
-  def otherWalk(interpreter: String => Option[Either[(String, Array[Byte]) => Unit, (String, Vector[String]) => Unit]]): Ok[String, Unit] = 
+  def otherWalk(interpreter: String => Option[String => FromStore[Unit]]): Ok[String, Unit] = 
     safe {
       // Simplifies the inner logic if we can have these out here
       // and just not use them if it's not a zip file.
@@ -199,27 +217,45 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             if (zf eq null)  zf = new ZipFile(who.toFile)
             if (zes eq null) zes = zf.entries.asScala.toArray
             zes.foreach{ ze =>
-              if (fileSet contains ze.getName) acceptor match {
-                case Left(fab)  => fab(ze.getName, zf.getInputStream(ze).gulp.?)
-                case Right(fvs) => fvs(ze.getName, zf.getInputStream(ze).slurp.?)
+              if (fileSet contains ze.getName) acceptor(ze.getName) match {
+                case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(zf.getInputStream(ze).gulp.?))
+                case ft: FromStore.Text[Unit]    => ft(Stored.Text(zf.getInputStream(ze).slurp.?))
               }
             }
           }
           else {
-            aFor(files){ (file, i) => acceptor match {
-              case Left(fab)  => fab(file, Files.readAllBytes(who resolve file))
-              case Right(fvs) => 
-                fvs(file, { 
+            aFor(files){ (file, i) => acceptor(file) match {
+              case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(Files.readAllBytes(who resolve file)))
+              case ft: FromStore.Text[Unit] => 
+                ft(Stored.Text({ 
                   val vb = Vector.newBuilder[String]
                   Files.lines(who resolve file).forEach(vb += _)
                   vb.result
-                })
+                }))
             }
           }}
         }
       }
       finally { if (zf ne null) zf.close }
     }.mapNo(e => s"Failed to process other files from $who:\n${e.explain(24)}")
+
+  def store(ct: ContentsTransformer[A] = ContentsTransformer.default[A], atomically: Boolean = true): Ok[String, Option[Contents[A]]] = {
+    var zipped = false
+    val target = ct.start(this) match {
+      case None => return Yes(None)
+      case Some(x) =>
+        if (x.getFileName endsWith ".atomic") return No(s"Target is not allowed to be a temporary file: $x")
+        if (x.getFileName endsWith ".zip") zipped = true
+        if (Files exists x) return No(s"Could not store $who because target exists:\n  $x")
+        if (atomically) {
+          val y = x.resolveSibling(x.getFileName + ".atomic")
+          if (Files exists y) return No(s"Could not store $who because temporary location for target exists:\n $y")
+          y
+        }
+        else x
+    }
+    ???
+  }
 }
 object Contents {
   def clipOffDir(s: String): String = {
@@ -296,7 +332,7 @@ object Contents {
 
   object Implicits {
     implicit class FilesKnowAboutMWT(file: File) {
-      def namedLikeMwtDir: Boolean = {
+      def namedLikeMwtTaget: Boolean = {
         val parts = file.base.split('_')
         parts.length >= 2 &&
         parts(parts.length-2).fn{ s =>
