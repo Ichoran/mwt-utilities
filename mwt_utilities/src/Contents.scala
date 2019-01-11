@@ -17,24 +17,6 @@ abstract class BlobVisitor {
   def stop(): Unit = {}
 }
 
-abstract class ContentsTransformer[A] {
-  def start(everything: Contents[A]): Option[Path] =
-    if (everything.target.isZip) None
-    else Some((everything.who.toFile % "zip").toPath)
-  def blobsFirst(): Boolean = true
-  def noSummary(): Option[Stored] = None
-  def summary(): FromStore[Option[Stored]] = FromStore.All(x => Some(x))
-  def repackBlobs(): Boolean
-  def blob(): Int => Option[FromStore.Text[Option[Stored.Text]]] = _ => Some(FromStore.Text(x => Some(x)))
-  def stopBlobs(): Map[Int, Stored.Text] = Map.empty
-  def other(): String => Option[String => FromStore[Option[Stored]]] = _ => Some(_ => FromStore.Binary(x => Some(x)))
-  def stop(): Map[String, () => (String, Stored)] = Map.empty
-}
-object ContentsTransformer {
-  def default[A]: ContentsTransformer[A] = new ContentsTransformer[A] { def repackBlobs() = false }
-}
-
-
 case class Contents[A](who: Path, target: OutputTarget, baseString: String, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
   def summaryWalk[U](f: String => U): Ok[String, Unit] =
     if (summary.isEmpty) No(s"No summary file in $who")
@@ -43,7 +25,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (target.isZip) {
         val zf = new ZipFile(who.toFile)
         try {
-          val ze = zf.entries.asScala.find(_.getName == filename).toOk.mapNo(_ => s"Cannot find $filename in $who").?
+          val ze = zf.entries.asScala.find(_.getName == filename) TOSSING s"Cannot find $filename in $who"
           zf.getInputStream(ze).reader.lines.forEach(line => f(line))
         }
         finally { zf.close }
@@ -238,24 +220,6 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       finally { if (zf ne null) zf.close }
     }.mapNo(e => s"Failed to process other files from $who:\n${e.explain(24)}")
-
-  def store(ct: ContentsTransformer[A] = ContentsTransformer.default[A], atomically: Boolean = true): Ok[String, Option[Contents[A]]] = {
-    var zipped = false
-    val target = ct.start(this) match {
-      case None => return Yes(None)
-      case Some(x) =>
-        if (x.getFileName endsWith ".atomic") return No(s"Target is not allowed to be a temporary file: $x")
-        if (x.getFileName endsWith ".zip") zipped = true
-        if (Files exists x) return No(s"Could not store $who because target exists:\n  $x")
-        if (atomically) {
-          val y = x.resolveSibling(x.getFileName + ".atomic")
-          if (Files exists y) return No(s"Could not store $who because temporary location for target exists:\n $y")
-          y
-        }
-        else x
-    }
-    ???
-  }
 }
 object Contents {
   def clipOffDir(s: String): String = {
@@ -283,7 +247,7 @@ object Contents {
     }
   }
   def from[A](p: Path, parser: String => Ok[String, A] = (s: String) => Ok.UnitYes, debug: Boolean = true): Ok[String, Contents[A]] = {
-    val target = OutputTarget.from(p, true).mapNo(e => s"Not a MWT output target:\n$e").?
+    val target = OutputTarget.from(p, true) TOSSING (e => s"Not a MWT output target:\n$e")
     val listing = safe {
       val ab = Array.newBuilder[String]
       if (target.isZip) {
@@ -300,7 +264,7 @@ object Contents {
         Files.list(p).forEach(pi => ab += pi.getFileName.toString)
       }
       ab.result
-    }.mapNo(e => s"Could not read $p\n$e\n").?
+    } TOSSING (e => s"Could not read $p\n$e\n")
     val (summaries, notSummaries) = listing.partition(_ endsWith ".summary")
     val summary = summaries.toList match {
       case Nil => None
@@ -315,7 +279,7 @@ object Contents {
       case b :: Nil => b
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }
-    val parsedBase = parser(base).mapNo(e => s"Cannot interpret base filename pattern $base\n  $e").?
+    val parsedBase = parser(base) TOSSING (e => s"Cannot interpret base filename pattern $base\n  $e")
     val (images, notBlobSummaryOrImage) =
       notBlobOrSummary.partition(f => ImageDecoder.library.contains(extractExt(f)))
     val otherMap = collection.mutable.AnyRefMap.empty[String, scala.collection.mutable.ArrayBuilder[String]]
