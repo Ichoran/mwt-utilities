@@ -2,6 +2,7 @@ package mwt.utilities
 
 import java.io._
 import java.nio.file._
+import java.nio.file.attribute.FileTime
 import java.time._
 import java.util.zip._
 
@@ -105,7 +106,7 @@ object CopyTransform {
     val path = ct.relocate(c.who |> safeParent)
 
     val zip = ct.toZip()
-    val whoName = c.who.getFileName pipe { name =>
+    val whoName = c.who.getFileName.toString pipe { name =>
       if (prefix == c.target.prefix) name
       else {
         val bits = name.split('_')
@@ -127,19 +128,90 @@ object CopyTransform {
     if (Files exists finalTarget) return No(s"Could not store ${c.who} because target exists:\n$finalTarget")
     if (atomically && Files.exists(target)) return No(s"Could not store ${c.who} because temporary location exists:\n$target")
 
-    val (blobsPhase, summaryPhase) = (if (ct.blobsFirst()) (1, 2) else (2, 1))
-    val repack = ct.repackBlobs()
+    val policy = ct.blobPolicy()
 
-    var phase = 0
-    while (phase < 3) { 
-      phase += 1
-      phase match {
-        case x if x == summaryPhase =>
-        case x if x == blobsPhase =>
-        case _ =>
+    val zos = safe {
+      if (zip) new ZipOutputStream(new FileOutputStream(target.toFile))
+      else (Files createDirectories target) pipe (_ => null)
+    }.TOSSING(s"Could not write $target\n" + _.explain())
+
+    val zf = safe {
+      if (c.target.isZip) new ZipFile(c.who.toFile)
+      else null
+    }.TOSSING{ e => safe{zos.close}; s"Could not open ${c.who}\n" + e.explain() }
+
+    try {
+      var phase = 0
+      while (phase < 5) { 
+        phase += 1
+        phase match {
+          case 1 => policy match {
+            case BlobPolicy.Copy =>
+              val binaries: Iterator[Ok[String, (String, FileTime, Array[Byte])]] =
+                if (c.target.isZip) new Iterator[Ok[String, (String, FileTime, Array[Byte])]] {
+                  private val pending = collection.mutable.HashSet(c.blobs: _*)
+                  private val zen = zf.entries
+                  private var oze: Option[ZipEntry] = None
+                  private var complete = false
+                  def hasNext: Boolean =
+                    if (complete) false
+                    else if (oze.isDefined) true
+                    else {
+                      while (zen.hasMoreElements && !oze.isDefined) {
+                        val ze = zen.nextElement
+                        if (pending contains ze.getName) {
+                          oze = Some(ze)
+                          pending - ze.getName
+                        }
+                      }
+                      if (oze.isEmpty && !zen.hasMoreElements) complete = true
+                      !complete
+                    }
+                  def next(): Ok[String, (String, FileTime, Array[Byte])] = {
+                    if (!hasNext || !oze.isDefined) return No(s"Tried to get next blob file in ${c.who} but there was none")
+                    val ze = oze.get
+                    oze = None
+                    val i = ze.getName.lastIndexOf('\\')
+                    val j = ze.getName.lastIndexOf('/')
+                    val k = (if (i < 0) j else if (j < 0) i else i max j)
+                    val nm = if (k < 0) ze.getName else ze.getName.substring(k+1)
+                    zf.getInputStream(ze).gulp.map(bytes => (nm, ze.getLastModifiedTime, bytes))
+                  }
+                }
+                else c.blobs.iterator.map{ b => 
+                  val p = c.who resolve b
+                  val t = Files.getLastModifiedTime(p)
+                  p.toFile.gulp.map(bytes => (b, t, bytes))
+                }
+              if (zos eq null) binaries.foreach{ x => x.? match { case (nm, t, b) =>
+                val p = target resolve nm
+                Files.write(p, b)
+                Files.setLastModifiedTime(p, t)
+              }}
+              else binaries.foreach{ x => x.? match { case (nm, t, b) =>
+                val ze = new ZipEntry(finalTarget.getFileName.toString + "/" + nm)
+                ze.setLastModifiedTime(t)
+                zos.putNextEntry(ze)
+                zos.write(b, 0, b.length)
+                zos.closeEntry()
+              }}
+            case BlobPolicy.Renumber =>
+            case BlobPolicy.Modify =>
+          }
+          case 2 => policy match {
+            case BlobPolicy.Copy if c.summary.isDefined =>
+            case _ /* Regen */ =>
+          }
+          case 3 => // Other phase
+          case _ => // Extra files phase
+        }
       }
     }
+    finally { 
+      if (zf ne null) zf.close
+      if (zos ne null) zos.close
+    }
 
-    ???
+    null
   }
 }

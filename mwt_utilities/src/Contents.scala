@@ -37,7 +37,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     summaryWalk{ vb += _ }.map(_ => Stored.Text(vb.result()))
   }
 
-  private def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
+  private[utilities] def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
     val i = name.lastIndexOf('.')
     val j = name.indexOf('_')
     if (i < 0) No(s"$name is not a blob file")
@@ -54,7 +54,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     }
   }
 
-  private def getIdFromBlobsLine(line: String, file: String, n: Int, seen: collection.mutable.Set[Int]): Ok[String, Int] =
+  private[utilities] def getIdFromBlobsLine(line: String, file: String, n: Int, seen: collection.mutable.Set[Int]): Ok[String, Int] =
     if (line.isEmpty || line(0) != '%') No(s"Line $n in $file does not start with %: $line")
     else {
       val g = Grok(line)
@@ -253,9 +253,8 @@ object Contents {
       if (target.isZip) {
         val zf = new ZipFile(p.toFile)
         try {
-          zf.entries.asScala.
-            filterNot(_.isDirectory).
-            foreach(ab += _.getName)
+          val zes = zf.entries
+          zes.asScala.filterNot(_.isDirectory).foreach(ab += _.getName)
         }
         finally { zf.close }
       }
@@ -264,7 +263,7 @@ object Contents {
         Files.list(p).forEach(pi => ab += pi.getFileName.toString)
       }
       ab.result
-    } TOSSING (e => s"Could not read $p\n$e\n")
+    }.mapNo(e => s"Could not read $p\n$e\n").?
     val (summaries, notSummaries) = listing.partition(_ endsWith ".summary")
     val summary = summaries.toList match {
       case Nil => None
