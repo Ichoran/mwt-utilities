@@ -12,21 +12,6 @@ import kse.flow._
 import kse.eio._
 
 
-sealed trait BlobPolicy {}
-object BlobPolicy {
-  /** Blobs require alteration/repacking, which will also mostly regenerate/renumber the summary file. */
-  sealed trait Repack extends BlobPolicy {}
-
-  /** Copy the blob files unchanged */
-  case object Copy extends BlobPolicy {}
-
-  /** Renumber the blobs, but keep them all. */
-  case object Renumber extends Repack {}
-
-  /** Modify and/or remove the blobs (with renumbering). */
-  case object Modify extends Repack {}
-}
-
 /** This class is a visitor for MWT data that is used when copying-and-transforming directories.
   */
 class ContentsTransformer[A] {
@@ -45,28 +30,30 @@ class ContentsTransformer[A] {
   /** Called to figure out whether to copy into a zip file or an uncompressed file */
   def toZip(): Boolean = true
 
-  /** Specifies how blobs are to be treated.  If the summary file is missing, or if
-    * the policy is a subclass of Repack, the summary file will also be regenerated/modified
-    * before being passed to the handler of the `summary()` method.
+  /** Specifies how blobs are to be treated.  If true, each blob will be visited and
+    * may be modified.  Otherwise, they'll just be copied unchanged (and no blobs can
+    * be added in that case).
     */
-  def blobPolicy(): BlobPolicy = BlobPolicy.Copy
-
-  /** This is called when there is a summary file to get a transformer from old to new summary file contents.
-    * Note that the data passed in here is that generated on the basis of any blob data.
-    */
-  def summary(): FromStore[Stored] = FromStore.All(x => x)
+  def modifyBlobs(): Boolean = false
 
   /** This returns a handler for blob files.  Note that this will _only_ be called if `blobPolicy`
-    * is `Modify`. It passes back a handler that creates a new block of blob text given the old one,
-    * or deletes it by producing `None`.  The blob number is _not_ part of the text; that is
-    * generated automatically.
+    * is `Modify`. It passes back a handler that on the left branch creates a new block of blob text
+    * given the old one, or requests for the blob to be dropped (`Right(false)`) or copied unchanged
+    * (`Right(true)`).
     */
-  def blob(n: Int): FromStore.Text[Option[Stored.Text]] = FromStore.Text(x => Some(x))
+  def blob(n: Int): FromStore.Text[Either[Stored.Text, Boolean]] = FromStore.Text(x => Right(true))
 
-  /** This is called when all blobs are done.  The return is any new blobs that are to be created in addition
-    * to the old ones (these blobs will get numbered automatically).
+  /** This is called when all blobs are done, but only if `modifyBlobs` is true.
+    * The return is any new blobs that are to be created in addition to the old ones
+    * (these blobs will get numbered automatically).
     */
   def stopBlobs(): Iterator[Stored.Text] = Iterator.empty
+
+  /** This is called when there is a summary file to get a transformer from old to new summary file contents.
+    * Note that the data passed in here will have been generated from blob data if the summary file needed to
+    * be generated, or if the blobs were changed/renumbered (and therefore the summary file needed modification too)
+    */
+  def summary(): FromStore[Stored] = FromStore.All(x => x)
 
   /** This is called to handle each category of other kinds of file.  If `None` is given, then the files
     * are all skipped.  Otherwise, each filename is passed into the function to return an appropriate handler
@@ -128,43 +115,43 @@ object CopyTransform {
     if (Files exists finalTarget) return No(s"Could not store ${c.who} because target exists:\n$finalTarget")
     if (atomically && Files.exists(target)) return No(s"Could not store ${c.who} because temporary location exists:\n$target")
 
-    val policy = ct.blobPolicy()
+    val mod = ct.modifyBlobs
 
     val zos = safe {
       if (zip) new ZipOutputStream(new FileOutputStream(target.toFile))
       else (Files createDirectories target) pipe (_ => null)
-    }.TOSSING(s"Could not write $target\n" + _.explain())
+    } TossAs (s"Could not write $target\n" + _.explain())
 
     val zf = safe {
       if (c.target.isZip) new ZipFile(c.who.toFile)
       else null
-    }.TOSSING{ e => safe{zos.close}; s"Could not open ${c.who}\n" + e.explain() }
+    } TossAs { e => safe{zos.close}; s"Could not open ${c.who}\n" + e.explain() }
 
     try {
       var phase = 0
       while (phase < 5) { 
         phase += 1
         phase match {
-          case 1 => policy match {
-            case BlobPolicy.Copy =>
+          case 1 =>
+            if (!mod) {
               val binaries: Iterator[Ok[String, (String, FileTime, Array[Byte])]] =
                 if (c.target.isZip) new Iterator[Ok[String, (String, FileTime, Array[Byte])]] {
                   private val pending = collection.mutable.HashSet(c.blobs: _*)
-                  private val zen = zf.entries
+                  private val zen = zf.entries.asScala
                   private var oze: Option[ZipEntry] = None
                   private var complete = false
                   def hasNext: Boolean =
                     if (complete) false
                     else if (oze.isDefined) true
                     else {
-                      while (zen.hasMoreElements && !oze.isDefined) {
-                        val ze = zen.nextElement
+                      while (zen.hasNext && !oze.isDefined) {
+                        val ze = zen.next
                         if (pending contains ze.getName) {
                           oze = Some(ze)
                           pending - ze.getName
                         }
                       }
-                      if (oze.isEmpty && !zen.hasMoreElements) complete = true
+                      if (oze.isEmpty && !zen.hasNext) complete = true
                       !complete
                     }
                   def next(): Ok[String, (String, FileTime, Array[Byte])] = {
@@ -195,13 +182,17 @@ object CopyTransform {
                 zos.write(b, 0, b.length)
                 zos.closeEntry()
               }}
-            case BlobPolicy.Renumber =>
-            case BlobPolicy.Modify =>
-          }
-          case 2 => policy match {
-            case BlobPolicy.Copy if c.summary.isDefined =>
-            case _ /* Regen */ =>
-          }
+            }
+            else {
+
+            }
+          case 2 => 
+            if (!mod && c.summary.isDefined) {
+
+            }
+            else {
+
+            }
           case 3 => // Other phase
           case _ => // Extra files phase
         }

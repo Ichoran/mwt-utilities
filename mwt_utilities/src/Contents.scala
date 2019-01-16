@@ -25,7 +25,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (target.isZip) {
         val zf = new ZipFile(who.toFile)
         try {
-          val ze = zf.entries.asScala.find(_.getName == filename) TOSSING s"Cannot find $filename in $who"
+          val ze = zf.entries.asScala.find(_.getName == filename) TossAs s"Cannot find $filename in $who"
           zf.getInputStream(ze).reader.lines.forEach(line => f(line))
         }
         finally { zf.close }
@@ -247,7 +247,7 @@ object Contents {
     }
   }
   def from[A](p: Path, parser: String => Ok[String, A] = (s: String) => Ok.UnitYes, debug: Boolean = true): Ok[String, Contents[A]] = {
-    val target = OutputTarget.from(p, true) TOSSING (e => s"Not a MWT output target:\n$e")
+    val target = OutputTarget.from(p, true) TossAs (e => s"Not a MWT output target:\n$e")
     val listing = safe {
       val ab = Array.newBuilder[String]
       if (target.isZip) {
@@ -278,7 +278,7 @@ object Contents {
       case b :: Nil => b
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }
-    val parsedBase = parser(base) TOSSING (e => s"Cannot interpret base filename pattern $base\n  $e")
+    val parsedBase = parser(base) TossAs (e => s"Cannot interpret base filename pattern $base\n  $e")
     val (images, notBlobSummaryOrImage) =
       notBlobOrSummary.partition(f => ImageDecoder.library.contains(extractExt(f)))
     val otherMap = collection.mutable.AnyRefMap.empty[String, scala.collection.mutable.ArrayBuilder[String]]
