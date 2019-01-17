@@ -1,11 +1,5 @@
 package mwt.utilities
 
-import java.io._
-import java.nio.file._
-import java.nio.file.attribute.FileTime
-import java.time._
-import java.util.zip._
-
 import java.lang.{ StringBuilder => JStringBuilder }
 
 import kse.flow._
@@ -42,7 +36,7 @@ class Summary() {
         }
       }
       else {
-        val n = math.max(lines.length + lines.length >> 1, m + m >> 2)
+        val n = math.max(lines.length + (lines.length >> 1), m + (m >> 2))
         val old = lines
         lines = new Array[Summary.Entry](n)
         var i = 0
@@ -50,10 +44,10 @@ class Summary() {
         var k = 0
         while (k < m) {
           lines(k) =
-            if (i >= linesN)                { val ans = old(i); i += 1; ans }
-            else if (j >= ex.length)        { val ans = ex(j);  j += 1; ans }
-            else if (ex(j).t >= lines(i).t) { val ans = old(i); i += 1; ans }
-            else                            { val ans = ex(j);  j += 1; ans }
+            if (i >= linesN)              { val ans = ex(j);  j += 1; ans }
+            else if (j >= ex.length)      { val ans = old(i); i += 1; ans }
+            else if (ex(j).t >= old(i).t) { val ans = old(i); i += 1; ans }
+            else                          { val ans = ex(j);  j += 1; ans }
           k += 1
         }
       }
@@ -80,6 +74,7 @@ class Summary() {
   }
 
   private[this] def myAddMissing(e: Summary.Entry): Summary.Entry = {
+    if (extra.size >= (if (lines eq null) 256 else math.max(256, lines.length >> 1))) pack()
     if (linesN < lines.length && (linesN == 0 || lines(linesN-1).t < e.t)) {
       lines(linesN) = e
       linesN += 1
@@ -93,6 +88,7 @@ class Summary() {
     if (existing ne null) { existing += e; existing }
     else myAddMissing(e)
   }
+  def add(g: Grok)(implicit fail: GrokHop[g.type]): Summary.Entry = add(Summary.Entry.parse(g))
 
   def get(t: Double):  Option[Summary.Entry] = Option(mySeek(t))
 
@@ -100,20 +96,21 @@ class Summary() {
     mySeek(t) ReturnIf (_ ne null)
     Summary.Entry(t) tap myAddMissing
   }
+
+  def text: Vector[String] = {
+    println(s"$linesN ${extra.size} ${if (lines ne null) lines.length else -1}")
+    pack()
+    if (linesN == 0) Vector.empty[String]
+    else {
+      val vb = Vector.newBuilder[String]
+      vb.sizeHint(linesN)
+      var i = 0; while (i < linesN) { vb += lines(i).toString; i += 1 }
+      vb.result
+    }
+  }
 }
 object Summary {
-  final def r1(x: Double): Double =
-    if (x < 0) { if (x < -1e14) x else (x*10 - 0.5).toLong/1e1 }
-    else       { if (x >  1e14) x else (x*10 + 0.5).toLong/1e1 }
-  final def r2(x: Double): Double = 
-    if (x < 0) { if (x < -1e13) x else (x*100 - 0.5).toLong/1e2 }
-    else       { if (x >  1e13) x else (x*100 + 0.5).toLong/1e2 }
-  final def r3(x: Double): Double = 
-    if (x < 0) { if (x < -1e12) x else (x*1000 - 0.5).toLong/1e3 }
-    else       { if (x >  1e12) x else (x*1000 + 0.5).toLong/1e3 }
-  final def r4(x: Double): Double = 
-    if (x < 0) { if (x < -1e11) x else (x*10000 - 0.5).toLong/1e4 }
-    else       { if (x >  1e11) x else (x*10000 + 0.5).toLong/1e4 }
+  import Approximation._
 
   class Entry private (val t: Double, val jtx: Double = 0.0, val jty: Double = 0.0, val jnx: Int = 0, val jny: Int = 0) {
     var n = 0
@@ -129,9 +126,49 @@ object Summary {
     var relAspect = 0.0
     var wiggle = 0.0
     var pixels = 0.0
-    var stimString = ""
+    var stimuli = 0L
     var findLoss: Array[Int] = null
     var findLossN = 0
+    def changeIdentity(prev: Int, succ: Int): this.type = {
+      if (findLoss eq null) findLoss = new Array[Int](4)
+      else if (findLossN + 2 > findLoss.length) findLoss = java.util.Arrays.copyOf(findLoss, findLoss.length + math.max(findLoss.length >> 1, 4))
+      findLoss(findLossN) = prev
+      findLoss(findLossN+1) = succ
+      findLossN += 1
+      this
+    }
+    def findIdentity(id: Int): this.type = changeIdentity(0, id)
+    def loseIdentity(id: Int): this.type = changeIdentity(id, 0)
+    def include(per: Double, sp: Double, aSp: Double, len: Double, rLen: Double, wid: Double, rWid: Double, asp: Double, rAsp: Double, wig: Double, pix: Int): this.type = {
+      if (goodN == 0) {
+        persist   = per
+        speed     = sp
+        angSpeed  = aSp
+        length    = len
+        relLength = rLen
+        width     = wid
+        relWidth  = rWid
+        aspect    = asp
+        relAspect = rAsp
+        wiggle    = wig
+        pixels    = pix
+      }
+      else {
+        persist   = ((persist   * goodN) + per ) / (goodN + 1)
+        speed     = ((speed     * goodN) + sp  ) / (goodN + 1)
+        angSpeed  = ((angSpeed  * goodN) + aSp ) / (goodN + 1)
+        length    = ((length    * goodN) + len ) / (goodN + 1)
+        relLength = ((relLength * goodN) + rLen) / (goodN + 1)
+        width     = ((width     * goodN) + wid ) / (goodN + 1)
+        relWidth  = ((relWidth  * goodN) + rWid) / (goodN + 1)
+        aspect    = ((aspect    * goodN) + asp ) / (goodN + 1)
+        relAspect = ((relAspect * goodN) + rAsp) / (goodN + 1)
+        wiggle    = ((wiggle    * goodN) + wig ) / (goodN + 1)
+        pixels    = ((pixels    * goodN) + pix ) / (goodN + 1)
+      }
+      goodN += 1
+      this
+    }
     def +=(that: Entry): this.type = {
       n += that.n
       if (that.goodN > 0) {
@@ -163,16 +200,12 @@ object Summary {
           goodN += that.goodN
         }
       }
-      if (!that.stimString.isEmpty) {
-        stimString =
-          if (stimString.isEmpty) that.stimString
-          else Entry.bitsToStimString(Entry.stimStringToBits(stimString) | Entry.stimStringToBits(that.stimString))        
-      }
+      stimuli |= that.stimuli
       if (that.findLossN > 0) {
         if (findLoss eq null) findLoss = java.util.Arrays.copyOf(that.findLoss, that.findLossN)
         else if (findLossN + that.findLossN <= findLoss.length) System.arraycopy(findLoss, findLossN, that.findLoss, 0, that.findLossN)
         else {
-          findLoss = java.util.Arrays.copyOf(findLoss, math.max(findLossN + findLossN>>1 + 2, findLossN + that.findLossN))
+          findLoss = java.util.Arrays.copyOf(findLoss, math.max(findLossN + (findLossN >> 1) + 2, findLossN + that.findLossN))
           System.arraycopy(findLoss, findLossN, that.findLoss, 0, that.findLossN)
         }
         findLossN += that.findLossN
@@ -180,8 +213,8 @@ object Summary {
       this
     }
     private[this] def addStimString(sb: JStringBuilder, prefix: String): JStringBuilder = 
-      if (stimString.isEmpty) sb
-      else sb append prefix append stimString
+      if (stimuli == 0) sb
+      else sb append prefix append Entry.bitsToStimString(stimuli)
     private[this] def addFindLossString(sb: JStringBuilder, prefix: String): JStringBuilder = 
       if (findLossN < 2) sb
       else {
@@ -213,17 +246,14 @@ object Summary {
     override def toString = addString(new JStringBuilder).toString
     override def equals(that: Any) = that match {
       case e: Entry =>
-        t == e.t &&
-        n == e.n && goodN == e.goodN && persist == e.persist &&
-        speed == e.speed && angSpeed == e.angSpeed &&
-        length == e.length && relLength == e.relLength &&
-        width == e.width && relWidth == e.relWidth &&
-        aspect == e.aspect && relAspect == e.relAspect &&
-        wiggle == e.wiggle && pixels == e.pixels &&
-        (
-          stimString.isEmpty == e.stimString.isEmpty &&
-          (if (stimString.nonEmpty) Entry.stimStringToBits(stimString) == Entry.stimStringToBits(e.stimString) else true)
-        ) &&
+        c4(t, e.t) &&
+        n == e.n && goodN == e.goodN && c2(persist, e.persist) &&
+        c3(speed, e.speed) && c4(angSpeed, e.angSpeed) &&
+        c2(length, e.length) && c4(relLength, e.relLength) &&
+        c2(width, e.width) && c4(relWidth, e.relWidth) &&
+        c4(aspect, e.aspect) && c4(relAspect, e.relAspect) &&
+        c4(wiggle, e.wiggle) && c2(pixels, e.pixels) &&
+        stimuli == e.stimuli &&
         (
           findLossN == e.findLossN &&
           { var i = 0; while (i < findLossN && findLoss(i) == e.findLoss(i)) {}; i == findLossN }
@@ -257,7 +287,7 @@ object Summary {
       val wiggle = g.D
       val pixels = g.D
       var x = g.peekTok
-      val stimString =
+      val stimuli =
         if ((x ne null) && x == "%") {
           g.skip
           val sb = new JStringBuilder
@@ -266,9 +296,9 @@ object Summary {
             if (sb.length > 0) sb append ' '
             sb append x
           }
-          sb.toString
+          stimStringToBits(sb.toString)
         }
-        else ""
+        else 0L
       val findLoss =
         if ((x ne null) && x == "%%") {
           g.skip
@@ -284,19 +314,20 @@ object Summary {
       val entry =
         if (g.hasContent) apply(t, g.D, g.D, g.I, g.I)
         else apply(t)
-      entry.n = n
-      entry.goodN = goodN
-      entry.persist = persist
-      entry.speed = speed
-      entry.angSpeed = angSpeed
-      entry.length = length
+      entry.n         = n
+      entry.goodN     = goodN
+      entry.persist   = persist
+      entry.speed     = speed
+      entry.angSpeed  = angSpeed
+      entry.length    = length
       entry.relLength = relLength
-      entry.width = width
-      entry.relWidth = relWidth
-      entry.aspect = relAspect
-      entry.wiggle = wiggle
-      entry.pixels = pixels
-      if (stimString.nonEmpty) entry.stimString = stimString
+      entry.width     = width
+      entry.relWidth  = relWidth
+      entry.aspect    = aspect
+      entry.relAspect = relAspect
+      entry.wiggle    = wiggle
+      entry.pixels    = pixels
+      entry.stimuli   = stimuli
       if (findLoss ne null) {
         entry.findLoss = findLoss
         entry.findLossN = findLoss.length
@@ -307,5 +338,22 @@ object Summary {
       if (s.startsWith("0x")) java.lang.Long.parseLong(s.substring(2), 16)
       else s.split("\\s+").map(x => 1L << (x.toInt-1).toLong).reduce(_ | _)
     def bitsToStimString(l: Long): String = "0x" + l.toHexString
+  }
+
+  def from(lines: Vector[String]): Ok[String, Summary] = {
+    val s = new Summary()
+    val g = Grok("")
+    var n = 0
+    g.delimit(true, 0)
+    g{ implicit fail => 
+      lines.foreach{ line =>
+        n += 1
+        if (line.nonEmpty && !line.startsWith("#")) {
+          g.input(line)
+          s add Entry.parse(g)
+        }
+      }
+      s
+    }.mapNo(e => s"Could not parse summary on line $n\n$e")
   }
 }

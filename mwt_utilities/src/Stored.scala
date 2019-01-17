@@ -23,3 +23,25 @@ object FromStore {
   }
   object All{ def apply[Z](a: All[Z]) = a }
 }
+
+object Approximation {
+  final def r1(x: Double): Double =
+    if (x < 0) { if (x < -1e14) x else (x*10 - 0.5).toLong/1e1 }
+    else       { if (x >  1e14) x else (x*10 + 0.5).toLong/1e1 }
+  final def r2(x: Double): Double = 
+    if (x < 0) { if (x < -1e13) x else (x*100 - 0.5).toLong/1e2 }
+    else       { if (x >  1e13) x else (x*100 + 0.5).toLong/1e2 }
+  final def r3(x: Double): Double = 
+    if (x < 0) { if (x < -1e12) x else (x*1000 - 0.5).toLong/1e3 }
+    else       { if (x >  1e12) x else (x*1000 + 0.5).toLong/1e3 }
+  final def r4(x: Double): Double = 
+    if (x < 0) { if (x < -1e11) x else (x*10000 - 0.5).toLong/1e4 }
+    else       { if (x >  1e11) x else (x*10000 + 0.5).toLong/1e4 }
+
+  final def c1(x: Double, y: Double): Boolean = (x-y).abs < 0.05
+  final def c2(x: Double, y: Double): Boolean = (x-y).abs < 0.005
+  final def c3(x: Double, y: Double): Boolean = (x-y).abs < 0.0005
+  final def c4(x: Double, y: Double): Boolean = (x-y).abs < 0.00005
+  final def c5(x: Double, y: Double): Boolean = (x-y).abs < 0.000005
+  final def c6(x: Double, y: Double): Boolean = (x-y).abs < 0.0000005  
+}
