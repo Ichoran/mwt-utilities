@@ -36,7 +36,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     val vb = Vector.newBuilder[String]
     summaryWalk{ vb += _ }.map(_ => Stored.Text(vb.result()))
   }
-  def theSummary: Ok[String, Summary] = summaryLines.map(Summary from _.lines)
+  def theSummary: Ok[String, Summary] = summaryLines.flatMap(Summary from _.lines)
 
   private[utilities] def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
     val i = name.lastIndexOf('.')
