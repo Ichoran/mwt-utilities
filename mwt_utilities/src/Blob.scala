@@ -7,16 +7,8 @@ import kse.maths._
 import kse.coll.packed._
 import kse.eio._
 
-class Blob() {
-  private[this] var lines: Array[Blob.Entry] = new Array[Blob.Entry](16)
-  private[this] var linesN = 0
-  def append(e: Blob.Entry): Blob.Entry = {
-    if (linesN >= lines.length) lines = java.util.Arrays.copyOf(lines, lines.length*2)
-    lines(linesN) = e
-    linesN += 1
-    e
-  }
-  def append(g: Grok)(implicit fail: GrokHop[g.type]): Summary.Entry = append(Summary.Entry.parse(g))
+class Blob extends TimedList[Blob.Entry] {
+  protected def myDefaultSize = 16
 }
 object Blob {
   import Approximation._
@@ -26,7 +18,8 @@ object Blob {
     val cx: Double, val cy: Double, val area: Int,
     val bx: Float, val by: Float, val len: Float, val wid: Float,
     val nSkel: Short, val nOut: Short, val ox: Short, val oy: Short, val data: Array[Int]
-  ) {
+  )
+  extends TimedElement {
     override def equals(that: Any): Boolean = that match {
       case e: Entry =>
         c4(t, e.t) && c4(cx, e.cx) && c4(cy, e.cy) && area == e.area &&

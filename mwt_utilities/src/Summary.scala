@@ -11,21 +11,15 @@ import kse.eio._
 class Summary extends TimedMonoidList[Summary.Entry] {
   protected def myDefaultSize = 256
   protected def emptyElement(t: Double) = Summary.Entry(t)
-  protected def mutableCombine(existing: Summary.Entry, novel: Summary.Entry) { existing += novel }
-
-  def apply(t: Double): Summary.Entry = {
-    mySeek(t) ReturnIf (_ ne null)
-    Summary.Entry(t) tap myAddMissing
-  }
+  protected def mutableMerge(existing: Summary.Entry, novel: Summary.Entry) { existing += novel }
 
   def text: Vector[String] = {
-    println(s"$linesN ${extra.size} ${if (lines ne null) lines.length else -1}")
     pack()
-    if (linesN == 0) Vector.empty[String]
+    if (myLinesN == 0) Vector.empty[String]
     else {
       val vb = Vector.newBuilder[String]
-      vb.sizeHint(linesN)
-      var i = 0; while (i < linesN) { vb += lines(i).toString; i += 1 }
+      vb.sizeHint(myLinesN)
+      var i = 0; while (i < myLinesN) { vb += myLines(i).toString; i += 1 }
       vb.result
     }
   }

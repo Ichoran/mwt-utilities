@@ -11,16 +11,16 @@ trait TimedElement {
   def t: Double
 }
 
-trait TimedList[E :> Null <: TimedElement] {
+trait TimedList[E >: Null <: TimedElement] {
   protected def myDefaultSize: Int
   protected var myLines: Array[TimedElement] = null
   protected var myLinesN: Int = 0
-  protected var myExtra: collection.mutable.TreeMap.empty[Double, E]
+  protected var myExtra = collection.mutable.TreeMap.empty[Double, E]
 
   def pack(): this.type = {
     if (myExtra.size > 0) {
       val ex = {
-        val temp = new Array[TimedElement](extra.size)
+        val temp = new Array[TimedElement](myExtra.size)
         var i = 0
         myExtra.valuesIterator.foreach{ e => temp(i) = e; i += 1 }
         temp
@@ -28,8 +28,8 @@ trait TimedList[E :> Null <: TimedElement] {
       myExtra.clear
       val m = myLinesN + ex.length
       if (myLines eq null) {
-        myLines = temp
-        myLinesN = temp.length
+        myLines = ex
+        myLinesN = ex.length
       }
       else if (m <= myLines.length) {
         var i = myLinesN - 1
@@ -46,7 +46,7 @@ trait TimedList[E :> Null <: TimedElement] {
       else {
         val n = math.max(myLines.length + (myLines.length >> 1), m + (m >> 2))
         val old = myLines
-        myLines = new Array[TimedEntry](n)
+        myLines = new Array[TimedElement](n)
         var i = 0
         var j = 0
         var k = 0
@@ -82,7 +82,7 @@ trait TimedList[E :> Null <: TimedElement] {
   }
 
   protected def myAddMissing(e: E): E = {
-    if (myExtra.size >= (if (myLines eq null) myDefaultSize else math.max(myDefaultSize, lines.length >> 1))) pack()
+    if (myExtra.size >= (if (myLines eq null) myDefaultSize else math.max(myDefaultSize, myLines.length >> 1))) pack()
     if ((myLines eq null) || (myLinesN <= 0 || myLines(myLinesN-1).t < e.t)) {
       if (myLines eq null) myLines = new Array[TimedElement](myDefaultSize)
       else if (myLinesN >= myLines.length) myLines = java.util.Arrays.copyOf(myLines, myLines.length*2)
@@ -97,17 +97,17 @@ trait TimedList[E :> Null <: TimedElement] {
 
   def get(t: Double):  Option[E] = Option(mySeek(t))
 
-  def length: Int = myLinesN + extra.size
+  def length: Int = myLinesN + myExtra.size
 
   def apply(i: Int): E = {
-    if (extra.size > 0) pack()
-    myLines(i)
+    if (myExtra.size > 0) pack()
+    myLines(i).asInstanceOf[E]
   }
 
   def at(t: Double): E = mySeek(t)
 }
 
-trait TimedMonoidList[E >: Null <: TimedElement] {
+trait TimedMonoidList[E >: Null <: TimedElement] extends TimedList[E] {
   protected def emptyElement(t: Double): E
   protected def mutableMerge(existing: E, novel: E): Unit
 
@@ -119,6 +119,6 @@ trait TimedMonoidList[E >: Null <: TimedElement] {
 
   override def at(t: Double): E = {
     mySeek(t) ReturnIf (_ ne null)
-    emptyEntry(t) tap myAddMissing
+    emptyElement(t) tap (e => myAddMissing(e))
   }
 }
