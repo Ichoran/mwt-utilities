@@ -24,8 +24,11 @@ class Summary extends TimedMonoidList[Summary.Entry] {
     }
   }
 }
-object Summary {
+object Summary extends TimedListCompanion {
   import Approximation._
+
+  type MyElement = Entry
+  type MyTimed = Summary
 
   class Entry private (val t: Double, val jtx: Double = 0.0, val jty: Double = 0.0, val jnx: Int = 0, val jny: Int = 0)
   extends TimedElement {
@@ -256,20 +259,9 @@ object Summary {
     def bitsToStimString(l: Long): String = "0x" + l.toHexString
   }
 
-  def from(lines: Vector[String]): Ok[String, Summary] = {
-    val s = new Summary()
-    val g = Grok("")
-    var n = 0
-    g.delimit(true, 0)
-    g{ implicit fail => 
-      lines.foreach{ line =>
-        n += 1
-        if (line.nonEmpty && !line.startsWith("#")) {
-          g.input(line)
-          s add Entry.parse(g)
-        }
-      }
-      s
-    }.mapNo(e => s"Could not parse summary on line $n\n$e")
-  }
+  def from(lines: Vector[String]): Ok[String, Summary] = myFrom(lines)(new Grokker{
+    def title = "summary"
+    def zero() = new Summary()
+    def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g)
+  })
 }

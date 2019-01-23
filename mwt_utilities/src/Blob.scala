@@ -7,11 +7,14 @@ import kse.maths._
 import kse.coll.packed._
 import kse.eio._
 
-class Blob extends TimedList[Blob.Entry] {
+class Blob(val id: Int) extends TimedList[Blob.Entry] {
   protected def myDefaultSize = 16
 }
-object Blob {
+object Blob extends TimedListCompanion {
   import Approximation._
+
+  type MyElement = Entry
+  type MyTimed = Blob
 
   class Entry(
     val t: Double, 
@@ -71,10 +74,19 @@ object Blob {
           i += 1
         }
         if ((nOut & 0xF) != 0) {
-          var bitz = data(iN)
+          var bitz = data(iN).toLong
           var nBitz = 2*(nOut&0xF)
-          sb append '#'
-          // TODO--fixme!!!!!!!!!!!  It's not '#'
+          if (nBits > 0) {
+            val m = (1 << nBits) - 1
+            bitz = (bitz << nBitz) | (bits & m)
+            nBitz += nBits
+          }
+          var mask = (1L << nBitz)-1
+          while (mask != 0) {
+            sb append (((bitz & mask) & 0x3F) + '0').toChar
+            bitz = bitz >>> 6
+            mask = mask >>> 6
+          }
         }
       }
       else if (nOut < 0) {
@@ -202,4 +214,10 @@ object Blob {
       new Entry(t, cx, cy, a, bx, by, len, wid, nSkel.toShort, opN.toShort, ox, oy, buf)
     }
   }
+
+  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = myFrom(lines)(new Grokker {
+    def title = "blob"
+    def zero() = new Blob(id)
+    def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton)
+  })
 }

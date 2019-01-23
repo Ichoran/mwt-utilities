@@ -44,7 +44,7 @@ trait TimedList[E >: Null <: TimedElement] {
         }
       }
       else {
-        val n = math.max(myLines.length + (myLines.length >> 1), m + (m >> 2))
+        val n = math.max(myLines.length + (myLines.length >> 2), m + (m >> 2))
         val old = myLines
         myLines = new Array[TimedElement](n)
         var i = 0
@@ -60,6 +60,11 @@ trait TimedList[E >: Null <: TimedElement] {
         }
       }
       myLinesN = m
+    }
+    if (myLines ne null) {
+      if (myLinesN + (myLinesN >> 2) < myLines.length) {
+        myLines = java.util.Arrays.copyOf(myLines, myLinesN)
+      }
     }
     this
   }
@@ -120,5 +125,35 @@ trait TimedMonoidList[E >: Null <: TimedElement] extends TimedList[E] {
   override def at(t: Double): E = {
     mySeek(t) ReturnIf (_ ne null)
     emptyElement(t) tap (e => myAddMissing(e))
+  }
+}
+
+trait TimedListCompanion {
+  type MyElement >: Null <: TimedElement
+  type MyTimed <: TimedList[MyElement]
+  type Grokker = TimedListCompanion.GrokTo[MyElement, MyTimed]
+
+  protected def myFrom(lines: Vector[String])(grokker: Grokker): Ok[String, MyTimed] = {
+    val c = grokker.zero()
+    val g = Grok("")
+    var n = 0
+    g.delimit(true, 0)
+    g{ implicit fail => 
+      lines.foreach{ line =>
+        n += 1
+        if (line.nonEmpty && !line.startsWith("#")) {
+          g.input(line)
+          c add grokker.grok(g)(fail)
+        }
+      }
+      c.pack()
+    }.mapNo(e => s"Could not parse ${grokker.title} on line $n\n$e")
+  }  
+}
+object TimedListCompanion {
+  trait GrokTo[A, Z] {
+    def title: String
+    def zero(): Z
+    def grok(g: Grok)(implicit gh: GrokHop[g.type]): A
   }
 }
