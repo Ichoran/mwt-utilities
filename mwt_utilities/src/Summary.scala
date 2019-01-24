@@ -13,16 +13,7 @@ class Summary extends TimedMonoidList[Summary.Entry] {
   protected def emptyElement(t: Double) = Summary.Entry(t)
   protected def mutableMerge(existing: Summary.Entry, novel: Summary.Entry) { existing += novel }
 
-  def text: Vector[String] = {
-    pack()
-    if (myLinesN == 0) Vector.empty[String]
-    else {
-      val vb = Vector.newBuilder[String]
-      vb.sizeHint(myLinesN)
-      var i = 0; while (i < myLinesN) { vb += myLines(i).toString; i += 1 }
-      vb.result
-    }
-  }
+  override def toString = text((i, _) => if (i < 10) (i+1).toString else null).mkString("\n")
 }
 object Summary extends TimedListCompanion {
   import Approximation._
@@ -259,9 +250,12 @@ object Summary extends TimedListCompanion {
     def bitsToStimString(l: Long): String = "0x" + l.toHexString
   }
 
-  def from(lines: Vector[String]): Ok[String, Summary] = myFrom(lines)(new Grokker{
+
+  private val myGrokker: Grokker = new Grokker{
     def title = "summary"
     def zero() = new Summary()
     def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g)
-  })
+  }
+
+  def from(lines: Vector[String]): Ok[String, Summary] = myFrom(lines)(myGrokker)
 }

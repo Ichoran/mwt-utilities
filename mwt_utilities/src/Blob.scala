@@ -9,6 +9,10 @@ import kse.eio._
 
 class Blob(val id: Int) extends TimedList[Blob.Entry] {
   protected def myDefaultSize = 16
+
+  def text(that: TimedList[_]): Vector[String] = text((_, e) => (that.indexOf(e.t) + 1).toString)
+
+  override def toString = (s"% $id" +: text((i, _) => if (i < 6) "" else null)).mkString("\n")
 }
 object Blob extends TimedListCompanion {
   import Approximation._
@@ -208,11 +212,13 @@ object Blob extends TimedListCompanion {
     }
   }
 
-  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = myFrom(lines)(new Grokker {
+  private val myGrokker: Grokker = new Grokker {
     def title = "blob"
     def zero() = new Blob(id)
     def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton)
-  })
+  }
+
+  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = myFrom(lines)(myGrokker)
 
   // TODO -- make a proper test of this
   object UnitTest {

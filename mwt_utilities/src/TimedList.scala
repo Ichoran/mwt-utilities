@@ -9,15 +9,16 @@ import kse.eio._
 
 trait TimedElement {
   def t: Double
+  def addString(sb: JStringBuilder): JStringBuilder
 }
 
 trait TimedList[E >: Null <: TimedElement] {
   protected def myDefaultSize: Int
-  protected var myLines: Array[TimedElement] = null
-  protected var myLinesN: Int = 0
-  protected var myExtra = collection.mutable.TreeMap.empty[Double, E]
+  final protected var myLines: Array[TimedElement] = null
+  final protected var myLinesN: Int = 0
+  final protected var myExtra = collection.mutable.TreeMap.empty[Double, E]
 
-  def pack(): this.type = {
+  final def pack(): this.type = {
     if (myExtra.size > 0) {
       val ex = {
         val temp = new Array[TimedElement](myExtra.size)
@@ -69,12 +70,12 @@ trait TimedList[E >: Null <: TimedElement] {
     this
   }
 
-  protected def mySeek(t: Double): E = {
+  final protected def mySeek(t: Double): E = {
     if (myLinesN > 0) {
       var i = 0
       var j = myLinesN - 1
       while (i < j) {
-        val k = (i + j) >> 1;
+        val k = (i + j) >>> 1
         val lkt = myLines(k).t
         if (lkt == t)     return myLines(k).asInstanceOf[E]
         else if (lkt < t) i = k+1
@@ -86,7 +87,7 @@ trait TimedList[E >: Null <: TimedElement] {
     else null
   }
 
-  protected def myAddMissing(e: E): E = {
+  final protected def myAddMissing(e: E): E = {
     if (myExtra.size >= (if (myLines eq null) myDefaultSize else math.max(myDefaultSize, myLines.length >> 1))) pack()
     if ((myLines eq null) || (myLinesN <= 0 || myLines(myLinesN-1).t < e.t)) {
       if (myLines eq null) myLines = new Array[TimedElement](myDefaultSize)
@@ -102,7 +103,7 @@ trait TimedList[E >: Null <: TimedElement] {
 
   def get(t: Double):  Option[E] = Option(mySeek(t))
 
-  def length: Int = myLinesN + myExtra.size
+  final def length: Int = myLinesN + myExtra.size
 
   def apply(i: Int): E = {
     if (myExtra.size > 0) pack()
@@ -110,6 +111,52 @@ trait TimedList[E >: Null <: TimedElement] {
   }
 
   def at(t: Double): E = mySeek(t)
+
+  def indexOf(t: Double, policy: Int = 0) = {
+    if (myExtra.nonEmpty) pack()
+    if (myLinesN == 0) 0
+    else if (t <= myLines(0).t) 0
+    else if (t >= myLines(myLinesN-1).t) myLinesN-1
+    else {
+      var i = 0
+      var j = myLinesN - 1
+      while (i+1 < j) {
+        val k = (i + j) >>> 1
+        val tk = myLines(k).t
+        if (tk > t) j = k
+        else        i = k
+      }
+      val ti = myLines(i).t
+      val tj = myLines(j).t
+      if (t == ti) i
+      else if (t == tj) j
+      else if (policy < 0) i
+      else if (policy > 0) j
+      else if (tj - t < t - ti) i
+      else j
+    }
+  }
+
+  final def text(pref: (Int, E) => String = (i, _) => (i + 1).toString): Vector[String] = {
+    pack()
+    if (myLinesN == 0) Vector.empty[String]
+    else {
+      val vb = Vector.newBuilder[String]
+      vb.sizeHint(myLinesN)
+      var stop = false
+      var i = 0
+      while (i < myLinesN && !stop) {
+        val e = myLines(i)
+        val p = pref(i, e.asInstanceOf[E])
+        if (p eq null) stop = true
+        else if (p.isEmpty) vb += e.toString
+        else vb += e.addString((new JStringBuilder) append p append ' ').toString
+        i += 1
+      }
+      if (stop) vb += "..."
+      vb.result
+    }
+  }
 }
 
 trait TimedMonoidList[E >: Null <: TimedElement] extends TimedList[E] {
