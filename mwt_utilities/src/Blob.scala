@@ -58,34 +58,34 @@ object Blob extends TimedListCompanion {
         val iN = i + (nOut >> 4)
         while (i < iN) {
           val x = data(i)
-          bits = bits | ((x << nBits) & 0x3F)
-          sb append (bits + '0').toChar
-          sb append (((x >>> ( 6 - nBits)) & 0x3F) + '0').toChar
-          sb append (((x >>> (12 - nBits)) & 0x3F) + '0').toChar
-          sb append (((x >>> (18 - nBits)) & 0x3F) + '0').toChar
-          sb append (((x >>> (24 - nBits)) & 0x3F) + '0').toChar
-          bits = x >>> (30 - nBits)
-          if (nBits == 4) {
-            sb append (bits + '0').toChar
+          bits = bits | (x << nBits)
+          sb append (( bits         & 0x3F) + '0').toChar
+          sb append (((bits >>>  6) & 0x3F) + '0').toChar
+          sb append (((bits >>> 12) & 0x3F) + '0').toChar
+          sb append (((bits >>> 18) & 0x3F) + '0').toChar
+          sb append (((bits >>> 24) & 0x3F) + '0').toChar
+          bits = (bits >>> 30) | (if (nBits > 0) x >>> (30 - nBits) else 0)
+          nBits += 2
+          if (nBits == 6) {
+            sb append ((bits & 0x3F) + '0').toChar
             nBits = 0
             bits = 0
           }
-          else nBits += 2
           i += 1
         }
-        if ((nOut & 0xF) != 0) {
-          var bitz = data(iN).toLong
-          var nBitz = 2*(nOut&0xF)
+        if (nBits > 0 || (nOut & 0xF) != 0) {
+          var nRemain = 2*(nOut & 0xF)
+          var remains = (if (nRemain > 0) data(iN).toLong else 0L)
           if (nBits > 0) {
             val m = (1 << nBits) - 1
-            bitz = (bitz << nBitz) | (bits & m)
-            nBitz += nBits
+            remains = (remains << nBits) | (bits & m)
+            nRemain += nBits
           }
-          var mask = (1L << nBitz)-1
+          var mask = (1L << nRemain)-1
           while (mask != 0) {
-            sb append (((bitz & mask) & 0x3F) + '0').toChar
-            bitz = bitz >>> 6
-            mask = mask >>> 6
+            sb append (((remains & mask) & 0x3F) + '0').toChar
+            remains = remains >>> 6
+            mask    = mask    >>> 6
           }
         }
       }
@@ -152,7 +152,7 @@ object Blob extends TimedListCompanion {
         packed = (tok ne null) && ((opN > 0 && (tok.length*3 - opN).abs < 3) || x.abs > Short.MaxValue || y.abs > Short.MaxValue)
         if (!packed && (tok ne null)) {
           var i = 0
-          while (!packed && i < tok.length) packed = !tok.charAt(i).isDigit
+          while (!packed && i < tok.length) { packed = !tok.charAt(i).isDigit; i += 1 }
         }
         if (!packed) {
           if (buf.length <= n + (if (tok eq null) 0 else 1))
@@ -171,6 +171,7 @@ object Blob extends TimedListCompanion {
             n += 1
             tok = g.peekTok
           }
+          opN = nSkel - n  // Use negative number to indicate unpacked
         }
         else {
           ox = x.toShort
@@ -179,26 +180,19 @@ object Blob extends TimedListCompanion {
           var bitN = 0
           var i = 0
           var j = opN
-          while (i < tok.length) {
-            val c = (tok.charAt(i) - '0') & 0x3F
-            if (j < 3) {
-              val cc = c & (0x3F >> (3 - j))
-              bits = bits | (cc << bitN)
-              bitN += 2*j
-              j = 0
-            }
-            else {
-              bits = bits | (c << bitN)
-              bitN += 6
-              j -= 3
-            }
+          while (i < tok.length && j > 0) {
+            val inc = math.min(3, j)*2
+            val c = (tok.charAt(i) - '0') & (0x3F >> (6-inc))
+            bits = bits | (c << bitN)
+            bitN += inc
             if (bitN >= 32) {
               if (buf.length <= n) buf = java.util.Arrays.copyOf(buf, buf.length + (buf.length >> 1))
               buf(n) = bits
               n += 1
               bitN -= 32
-              bits = if (bitN > 0) c >>> (6 - bitN) else 0
+              bits = if (bitN > 0) c >>> (inc - bitN) else 0
             }
+            j -= inc/2
             i += 1
           }
           if (bitN > 0) {
@@ -206,7 +200,6 @@ object Blob extends TimedListCompanion {
             buf(n) = bits
             n += 1
           }
-          opN = opN - j
         } 
       }
       if (n == 0) buf = noSkeleton
@@ -220,4 +213,32 @@ object Blob extends TimedListCompanion {
     def zero() = new Blob(id)
     def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton)
   })
+
+  // TODO -- make a proper test of this
+  object UnitTest {
+    import kse.maths.stochastic.Pcg64
+    def test_outline_bits(r: Pcg64 = new Pcg64): Ok[(Int, String, Option[Entry]), Unit] = {
+      (1 to 66).iterator.map{ n => 
+        Iterator.
+          continually{ 
+            val sb = new java.lang.StringBuilder
+            var nb = 2*n
+            while (nb > 0) { sb append ('0' + (r % (1 << math.min(6, nb)))).toChar; nb -= 6 }
+            sb.toString
+          }.
+          map(x => x -> s"1 0.0  0.0 0.0  42  0.0 0.0  0  9.9 1.1 %% 0 0 $n $x").
+          map{ case (x, s) => 
+            val g = Grok(s);
+            (n, x, s, g{ implicit fail => mwt.utilities.Blob.Entry.parse(g) })
+          }.
+          take(1000).
+          find{ case (_, x, _, e) => 
+            !e.isOk || !(e.yes.toString.split("\\s+").last == x)
+          }
+      }.find(_.isDefined).flatten match {
+        case None            => Ok.UnitYes
+        case Some((n, x, s, e)) => No((n, x, e.toOption))
+      }
+    }
+  }
 }
