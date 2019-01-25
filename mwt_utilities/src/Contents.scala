@@ -21,36 +21,39 @@ abstract class BlobVisitor {
 abstract class FilesVisitor {
   def start(): Unit = {}
   def requestBlobs: Boolean = false
-  def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def visitBlobData(name: String, modified: FileTime): FromStore[Unit] = { _ => () }: FromStore.Binary[Unit]
   def noMoreBlobs(): Unit = {}
   def requestSummary: Boolean = false
-  def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def visitSummary(name: String, modified: FileTime): FromStore[Unit] = { _ => () }: FromStore.Binary[Unit]
   def noSummary(): Unit = {}
   def requestImages: Boolean = false
-  def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def visitImage(name: String, modified: FileTime): FromStore[Unit] = { _ => () }: FromStore.Binary[Unit]
   def noMoreImages(): Unit = {}
   def requestOthers(category: String): Boolean = false
-  def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def visitOther(category: String, name: String, modified: FileTime): FromStore[Unit] = { _ => () }: FromStore.Binary[Unit]
   def noMoreOfTheseOthers(): Unit = {}
   def stop(): Unit = {}
 }
 object FilesVisitor {
   def justSummary(callback: Array[Byte] => Unit): FilesVisitor = new FilesVisitor {
     override def requestSummary = true
-    override def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(content)
+    override def visitSummary(name: String, modified: FileTime): FromStore[Unit] =
+      { x => callback(x.data) }: FromStore.Binary[Unit]
   }
   def justBlobData(callback: (String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
     override def requestBlobs = true
-    override def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(name, content)
+    override def visitBlobData(name: String, modified: FileTime): FromStore[Unit] = 
+      { x => callback(name, x.data) }: FromStore.Binary[Unit]
   }
   def justImages(callback: (String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
     override def requestImages = true
-    override def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(name, content)
+    override def visitImage(name: String, modified: FileTime): FromStore[Unit] =
+      { x => callback(name, x.data) }: FromStore.Binary[Unit]
   }
   def justOthers(callback: (String, String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
     override def requestOthers(category: String) = true
-    override def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = 
-      callback(category, name, content)
+    override def visitOther(category: String, name: String, modified: FileTime): FromStore[Unit] = 
+      { x => callback(category, name, x.data) }: FromStore.Binary[Unit]
   }
 
   // TODO--move this to an actual toSet
@@ -58,13 +61,20 @@ object FilesVisitor {
     class ByteCounter extends mwt.utilities.FilesVisitor {
       var count: Long = 0L
       override def requestBlobs = true
-      override def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def visitBlobData(name: String, modified: FileTime) = 
+        { x => count += x.data.length; () }: FromStore.Binary[Unit]
+
       override def requestSummary = true
-      override def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def visitSummary(name: String, modified: FileTime) = 
+        { x => count += x.data.length; () }: FromStore.Binary[Unit]
+
       override def requestImages = true
-      override def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def visitImage(name: String, modified: FileTime) = 
+        { x => count += x.data.length; () }: FromStore.Binary[Unit]
+
       override def requestOthers(category: String) = true
-      override def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def visitOther(category: String, name: String, modified: FileTime) = 
+        { x => count += x.data.length; () }: FromStore.Binary[Unit]
     }
 
     // TODO--write a test!
@@ -96,25 +106,37 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         }
         if (fv.requestBlobs) {
           bzes.foreach{ bze =>
-            fv.visitBlobData(bze.getName, bze.getLastModifiedTime, zf.getInputStream(bze).gulp.?)
+            fv.visitBlobData(bze.getName, bze.getLastModifiedTime) match {
+              case b: FromStore.Binary[_] => b(zf.getInputStream(bze).gulp.?)
+              case t: FromStore.Text[_]   => t(zf.getInputStream(bze).slurp.?)
+            }
           }
           fv.noMoreBlobs()
         }
         if (fv.requestSummary) {
           sze match {
-            case Some(ze) => fv.visitSummary(ze.getName, ze.getLastModifiedTime, zf.getInputStream(ze).gulp.?)
+            case Some(ze) => fv.visitSummary(ze.getName, ze.getLastModifiedTime) match {
+              case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
+              case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+            }
             case None     => fv.noSummary()
           }
         }
         if (fv.requestImages) {
           izes.foreach{ ize =>
-            fv.visitBlobData(ize.getName, ize.getLastModifiedTime, zf.getInputStream(ize).gulp.?)
+            fv.visitBlobData(ize.getName, ize.getLastModifiedTime) match {
+              case b: FromStore.Binary[_] => b(zf.getInputStream(ize).gulp.?)
+              case t: FromStore.Text[_]   => t(zf.getInputStream(ize).slurp.?)
+            }
           }
         }
         ozes.foreach{ case (ext, zes) =>
           if (fv.requestOthers(ext) && zes.nonEmpty) {
             zes.foreach{ ze =>
-              fv.visitOther(ext, ze.getName, ze.getLastModifiedTime, zf.getInputStream(ze).gulp.?)
+              fv.visitOther(ext, ze.getName, ze.getLastModifiedTime) match {
+               case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
+               case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+              }
             }
             fv.noMoreOfTheseOthers()
           }
@@ -126,7 +148,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (fv.requestBlobs) {
         blobs.foreach{ blob =>
           val p = who resolve blob
-          fv.visitBlobData(blob, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+          fv.visitBlobData(blob, Files.getLastModifiedTime(p)) match {
+            case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
+            case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+          }
         }
         fv.noMoreBlobs()
       }
@@ -134,7 +159,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         summary match {
           case Some(s) =>
             val p = who resolve s
-            fv.visitSummary(s, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+            fv.visitSummary(s, Files.getLastModifiedTime(p)) match {
+              case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
+              case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            }
           case None =>
             fv.noSummary()
         }
@@ -142,7 +170,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (fv.requestImages) {
         images.foreach{ image =>
           val p = who resolve image
-          fv.visitImage(image, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+          fv.visitImage(image, Files.getLastModifiedTime(p)) match {
+            case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
+            case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+          }
         }
         fv.noMoreImages()
       }
@@ -150,7 +181,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         if (fv.requestOthers(ext) && fs.nonEmpty) {
           fs.foreach{ f =>
             val p = who resolve f
-            fv.visitOther(ext, f, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+            fv.visitOther(ext, f, Files.getLastModifiedTime(p)) match {
+              case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
+              case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            }
           }
           fv.noMoreOfTheseOthers()
         }

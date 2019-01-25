@@ -9,10 +9,16 @@ object Stored {
 
 sealed abstract class FromStore[+Z] {}
 object FromStore {
-  trait Text[+Z] extends FromStore[Z] { def apply(t: Stored.Text): Z }
+  trait Text[+Z] extends FromStore[Z] { 
+    def apply(t: Stored.Text): Z
+    final def apply(lines: Vector[String]): Z = apply(new Stored.Text(lines))
+  }
   object Text{ def apply[Z](t: Text[Z]) = t }
 
-  trait Binary[+Z] extends FromStore[Z] { def apply(b: Stored.Binary): Z }
+  trait Binary[+Z] extends FromStore[Z] {
+    def apply(b: Stored.Binary): Z
+    final def apply(data: Array[Byte]): Z = apply(new Stored.Binary(data))
+  }
   object Binary{ def apply[Z](b: Binary[Z]) = b }
 
   trait All[+Z] extends Text[Z] with Binary[Z] {
