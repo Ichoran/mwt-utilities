@@ -13,6 +13,8 @@ class Summary extends TimedMonoidList[Summary.Entry] {
   protected def emptyElement(t: Double) = Summary.Entry(t)
   protected def mutableMerge(existing: Summary.Entry, novel: Summary.Entry) { existing += novel }
 
+  def text(): Vector[String] = text((i, _) => (i+1).toString)
+
   override def toString = text((i, _) => if (i < 10) (i+1).toString else null).mkString("\n")
 }
 object Summary extends TimedListCompanion {

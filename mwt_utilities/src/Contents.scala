@@ -2,6 +2,7 @@ package mwt.utilities
 
 import java.io._
 import java.nio.file._
+import java.nio.file.attribute.FileTime
 import java.time._
 import java.util.zip._
 
@@ -17,7 +18,111 @@ abstract class BlobVisitor {
   def stop(): Unit = {}
 }
 
+abstract class FilesVisitor {
+  def start(): Unit = {}
+  def requestBlobs: Boolean = false
+  def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def noMoreBlobs(): Unit = {}
+  def requestSummary: Boolean = false
+  def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def noSummary(): Unit = {}
+  def requestImages: Boolean = false
+  def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def noMoreImages(): Unit = {}
+  def requestOthers(category: String): Boolean = false
+  def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = {}
+  def noMoreOfTheseOthers(): Unit = {}
+  def stop(): Unit = {}
+}
+
 case class Contents[A](who: Path, target: OutputTarget, baseString: String, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
+  def visitAll(fv: FilesVisitor): Ok[String, Unit] = safe {
+    fv.start()
+    if (target.isZip) {
+      val zf = new ZipFile(who.toFile)
+      try {
+        val bSet = blobs.toSet
+        val sSet = summary.toSet
+        val iSet = images.toSet
+        val oMap = others.toArray.flatMap{ case (k, vs) => vs.map(v => v -> k) }.toMap
+        val (bzes, sze, izes, ozes) = {
+          val bsb = Array.newBuilder[ZipEntry]
+          val sb  = Array.newBuilder[ZipEntry]
+          val isb = Array.newBuilder[ZipEntry]
+          val osb = Array.newBuilder[(String, ZipEntry)]
+          zf.entries.asScala.foreach{ e =>
+            if (bSet contains e.getName)      bsb += e
+            else if (iSet contains e.getName) isb += e
+            else if (sSet contains e.getName) sb  += e
+            else oMap.get(e.getName).foreach{ ext => osb += ext -> e }
+          }
+          (bsb.result, sb.result.headOption, isb.result, osb.result.groupBy(_._1).map{ case (k, vs) => k -> vs.map(_._2) })
+        }
+        if (fv.requestBlobs) {
+          bzes.foreach{ bze =>
+            fv.visitBlobData(bze.getName, bze.getLastModifiedTime, zf.getInputStream(bze).gulp.?)
+          }
+          fv.noMoreBlobs()
+        }
+        if (fv.requestSummary) {
+          sze match {
+            case Some(ze) => fv.visitSummary(ze.getName, ze.getLastModifiedTime, zf.getInputStream(ze).gulp.?)
+            case None     => fv.noSummary()
+          }
+        }
+        if (fv.requestImages) {
+          izes.foreach{ ize =>
+            fv.visitBlobData(ize.getName, ize.getLastModifiedTime, zf.getInputStream(ize).gulp.?)
+          }
+        }
+        ozes.foreach{ case (ext, zes) =>
+          if (fv.requestOthers(ext) && zes.nonEmpty) {
+            zes.foreach{ ze =>
+              fv.visitOther(ext, ze.getName, ze.getLastModifiedTime, zf.getInputStream(ze).gulp.?)
+            }
+            fv.noMoreOfTheseOthers()
+          }
+        }
+      }
+      finally { zf.close }
+    }
+    else {
+      if (fv.requestBlobs) {
+        blobs.foreach{ blob =>
+          val p = who resolve blob
+          fv.visitBlobData(blob, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+        }
+        fv.noMoreBlobs()
+      }
+      if (fv.requestSummary) {
+        summary match {
+          case Some(s) =>
+            val p = who resolve s
+            fv.visitSummary(s, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+          case None =>
+            fv.noSummary()
+        }
+      }
+      if (fv.requestImages) {
+        images.foreach{ image =>
+          val p = who resolve image
+          fv.visitImage(image, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+        }
+        fv.noMoreImages()
+      }
+      others.foreach{ case (ext, fs) =>
+        if (fv.requestOthers(ext) && fs.nonEmpty) {
+          fs.foreach{ f =>
+            val p = who resolve f
+            fv.visitOther(ext, f, Files.getLastModifiedTime(p), p.toFile.gulp.?)
+          }
+          fv.noMoreOfTheseOthers()
+        }
+      }
+    }
+    fv.stop()
+  }.mapNo(e => s"Could not visit MWT output\n${e.explain(24)}")
+
   def summaryWalk[U](f: String => U): Ok[String, Unit] =
     if (summary.isEmpty) No(s"No summary file in $who")
     else safe {
@@ -32,11 +137,14 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       else Files.lines(who resolve filename).forEach(line => f(line))
     }.mapNo(e => s"Could not read ${summary.get} in $who:\n${e.explain(10)}\n")
+
   def summaryLines: Ok[String, Stored.Text] = {
     val vb = Vector.newBuilder[String]
     summaryWalk{ vb += _ }.map(_ => Stored.Text(vb.result()))
   }
-  def theSummary: Ok[String, Summary] = summaryLines.flatMap(Summary from _.lines)
+
+  def theSummary(): Ok[String, Summary] = summaryLines.flatMap(Summary from _.lines)
+
 
   private[utilities] def getIdFromBlobName(name: String, seen: collection.mutable.Set[Int]): Ok[String, Int] = {
     val i = name.lastIndexOf('.')
@@ -69,7 +177,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
     }
 
-  def blobsVisit(visitor: BlobVisitor): Ok[String, Unit] = {
+  def blobVisit(visitor: BlobVisitor): Ok[String, Unit] = {
     val seen = collection.mutable.Set.empty[Int]
     safe {
       val seen = collection.mutable.Set.empty[Int]
@@ -134,7 +242,8 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
     }.mapNo(e => s"Failed to process blobs from $who:\n${e.explain(16)}\n")
   }
-  def blobLinesWalk[U](f: (Int, Stored.Text) => U) = blobsVisit(new BlobVisitor {
+
+  def blobLinesWalk[U](f: (Int, Stored.Text) => U) = blobVisit(new BlobVisitor {
     private var myId: Int = -1
     private var myVb: collection.mutable.Builder[String, Vector[String]] = null
     override def start(id: Int) = { myId = id; myVb = Vector.newBuilder[String]; true }
@@ -142,37 +251,46 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     override def stop() { f(myId, Stored.Text(myVb.result())); myVb = null }
   })
 
-  def imagesWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = 
-    safe {
-      if (target.isZip) {
-        val imageSet = images.toSet
-        val zf = new ZipFile(who.toFile)
-        try {
-          val zei = zf.entries.asScala
-          while (zei.hasNext) { 
-            val ze = zei.next
-            if (imageSet contains ze.getName) {
-              val acceptor = dispatch(ze.getName)
-              if (acceptor.acceptable(ze.getName)) {
-                acceptor.accept(zf.getInputStream(ze).gulp.?)
-              }
+  def blobWalk[U](f: Blob => U, keepSkeleton: Boolean = true): Ok[String, Unit] =
+    blobLinesWalk((i, txt) => f(Blob.from(i, txt.lines, keepSkeleton).?))
+
+  def theBlobs(keepSkeleton: Boolean = true): Ok[String, Array[Blob]] = {
+    val ab = Array.newBuilder[Blob]
+    blobWalk(ab += _).map(_ => ab.result)
+  }
+
+
+  def imageWalk(dispatch: String => ImageAcceptor): Ok[String, Unit] = safe {
+    if (target.isZip) {
+      val imageSet = images.toSet
+      val zf = new ZipFile(who.toFile)
+      try {
+        val zei = zf.entries.asScala
+        while (zei.hasNext) { 
+          val ze = zei.next
+          if (imageSet contains ze.getName) {
+            val acceptor = dispatch(ze.getName)
+            if (acceptor.acceptable(ze.getName)) {
+              acceptor.accept(zf.getInputStream(ze).gulp.?)
             }
           }
         }
-        finally { zf.close }
       }
-      else {
-        aFor(images){ (image, i) =>
-          val acceptor = dispatch(image)
-          if (acceptor.acceptable(image)) {
-            acceptor.accept(Files.readAllBytes(who resolve image)).?
-          }
+      finally { zf.close }
+    }
+    else {
+      aFor(images){ (image, i) =>
+        val acceptor = dispatch(image)
+        if (acceptor.acceptable(image)) {
+          acceptor.accept(Files.readAllBytes(who resolve image)).?
         }
       }
-    }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
-  def imagesDecoded(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
+    }
+  }.mapNo(e => s"Could not successfully process images from $who:\n${e.explain(12)}\n")
+
+  def theImages(p: String => Boolean): Ok[String, Array[(String, java.awt.image.BufferedImage)]] = {
     val ans = Array.newBuilder[(String, java.awt.image.BufferedImage)]
-    imagesWalk{ filename =>
+    imageWalk{ filename =>
       if (!p(filename)) ImageDecoder.DoNotDecode
       val i = filename.lastIndexOf('.')
       val key = if (i < 0) "" else filename.substring(i)
@@ -183,44 +301,44 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     }.map(_ => ans.result())
   }
 
-  def otherWalk(interpreter: String => Option[String => FromStore[Unit]]): Ok[String, Unit] = 
-    safe {
-      // Simplifies the inner logic if we can have these out here
-      // and just not use them if it's not a zip file.
-      // Using null instead of Option because why not?
-      var zf: ZipFile = null
-      var zes: Array[ZipEntry] = null
-      try {
-        for {
-          (ext, files) <- others
-          acceptor <- interpreter(ext)
-        } {
-          if (target.isZip) {
-            val fileSet = files.toSet
-            if (zf eq null)  zf = new ZipFile(who.toFile)
-            if (zes eq null) zes = zf.entries.asScala.toArray
-            zes.foreach{ ze =>
-              if (fileSet contains ze.getName) acceptor(ze.getName) match {
-                case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(zf.getInputStream(ze).gulp.?))
-                case ft: FromStore.Text[Unit]    => ft(Stored.Text(zf.getInputStream(ze).slurp.?))
-              }
+
+  def otherWalk(interpreter: String => Option[String => FromStore[Unit]]): Ok[String, Unit] = safe {
+    // Simplifies the inner logic if we can have these out here
+    // and just not use them if it's not a zip file.
+    // Using null instead of Option because why not?
+    var zf: ZipFile = null
+    var zes: Array[ZipEntry] = null
+    try {
+      for {
+        (ext, files) <- others
+        acceptor <- interpreter(ext)
+      } {
+        if (target.isZip) {
+          val fileSet = files.toSet
+          if (zf eq null)  zf = new ZipFile(who.toFile)
+          if (zes eq null) zes = zf.entries.asScala.toArray
+          zes.foreach{ ze =>
+            if (fileSet contains ze.getName) acceptor(ze.getName) match {
+              case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(zf.getInputStream(ze).gulp.?))
+              case ft: FromStore.Text[Unit]    => ft(Stored.Text(zf.getInputStream(ze).slurp.?))
             }
           }
-          else {
-            aFor(files){ (file, i) => acceptor(file) match {
-              case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(Files.readAllBytes(who resolve file)))
-              case ft: FromStore.Text[Unit] => 
-                ft(Stored.Text({ 
-                  val vb = Vector.newBuilder[String]
-                  Files.lines(who resolve file).forEach(vb += _)
-                  vb.result
-                }))
-            }
-          }}
         }
+        else {
+          aFor(files){ (file, i) => acceptor(file) match {
+            case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(Files.readAllBytes(who resolve file)))
+            case ft: FromStore.Text[Unit] => 
+              ft(Stored.Text({ 
+                val vb = Vector.newBuilder[String]
+                Files.lines(who resolve file).forEach(vb += _)
+                vb.result
+              }))
+          }
+        }}
       }
-      finally { if (zf ne null) zf.close }
-    }.mapNo(e => s"Failed to process other files from $who:\n${e.explain(24)}")
+    }
+    finally { if (zf ne null) zf.close }
+  }.mapNo(e => s"Failed to process other files from $who:\n${e.explain(24)}")
 }
 object Contents {
   def clipOffDir(s: String): String = {

@@ -18,6 +18,13 @@ trait TimedList[E >: Null <: TimedElement] {
   final protected var myLinesN: Int = 0
   final protected var myExtra = collection.mutable.TreeMap.empty[Double, E]
 
+  final def loot(that: TimedList[E]): this.type = {
+    myLines = that.myLines
+    myLinesN = that.myLinesN
+    myExtra = that.myExtra
+    this
+  }
+
   final def pack(): this.type = {
     if (myExtra.size > 0) {
       val ex = {
@@ -157,6 +164,8 @@ trait TimedList[E >: Null <: TimedElement] {
       vb.result
     }
   }
+
+  def text(): Vector[String]
 }
 
 trait TimedMonoidList[E >: Null <: TimedElement] extends TimedList[E] {

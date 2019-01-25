@@ -12,7 +12,9 @@ class Blob(val id: Int) extends TimedList[Blob.Entry] {
 
   def text(that: TimedList[_]): Vector[String] = text((_, e) => (that.indexOf(e.t) + 1).toString)
 
-  override def toString = (s"% $id" +: text((i, _) => if (i < 6) "" else null)).mkString("\n")
+  def text(): Vector[String] = text((_, e) => e.frame.toString)
+
+  override def toString = (s"% $id" +: text((i, e) => if (i < 6) e.frame.toString else null)).mkString("\n")
 }
 object Blob extends TimedListCompanion {
   import Approximation._
@@ -21,6 +23,7 @@ object Blob extends TimedListCompanion {
   type MyTimed = Blob
 
   class Entry(
+    val frame: Int,
     val t: Double, 
     val cx: Double, val cy: Double, val area: Int,
     val bx: Float, val by: Float, val len: Float, val wid: Float,
@@ -117,7 +120,7 @@ object Blob extends TimedListCompanion {
     private val noSkeleton = new Array[Int](0)
     def parse(g: Grok, keepSkeleton: Boolean = true)(implicit fail: GrokHop[g.type]): Entry = {
       g.delimit(true, 0)
-      g.skip
+      val frame = g.I
       val t = g.D
       val cx = g.D
       val cy = g.D
@@ -208,17 +211,18 @@ object Blob extends TimedListCompanion {
       }
       if (n == 0) buf = noSkeleton
       else if (n + (n >> 2) < buf.length) buf = java.util.Arrays.copyOf(buf, n)
-      new Entry(t, cx, cy, a, bx, by, len, wid, nSkel.toShort, opN.toShort, ox, oy, buf)
+      new Entry(frame, t, cx, cy, a, bx, by, len, wid, nSkel.toShort, opN.toShort, ox, oy, buf)
     }
   }
 
-  private val myGrokker: Grokker = new Grokker {
+  private def myGrokker(id: Int, keepSkeleton: Boolean): Grokker = new Grokker {
     def title = "blob"
     def zero() = new Blob(id)
     def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton)
   }
 
-  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = myFrom(lines)(myGrokker)
+  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = 
+    myFrom(lines)(myGrokker(id, keepSkeleton))
 
   // TODO -- make a proper test of this
   object UnitTest {

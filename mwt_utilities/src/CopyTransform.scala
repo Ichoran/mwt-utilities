@@ -10,6 +10,7 @@ import scala.collection.JavaConverters._
 
 import kse.flow._
 import kse.eio._
+import kse.maths._
 
 
 /** This class is a visitor for MWT data that is used when copying-and-transforming directories.
@@ -70,6 +71,45 @@ class ContentsTransformer[A] {
 object ContentsTransformer {
   /** Copies existing files without changes */
   def default[A]: ContentsTransformer[A] = new ContentsTransformer[A] {}
+
+  /** Cleans up existing files without losing much */
+  def clean[A](minMove: Double, minTime: Double, target: Path): ContentsTransformer[A] = new ContentsTransformer[A] {
+    private var newID = 0
+    private def movedEnough(b: Blob): Boolean = {
+      var eb = b(0)
+      var minX = eb.cx
+      var maxX = eb.cx
+      var minY = eb.cy
+      var maxY = eb.cy
+      var maxL = eb.len
+      var i = 1
+      while (i < b.length) {
+        eb = b(i)
+        if      (eb.cx < minX) minX = eb.cx
+        else if (eb.cx > maxX) maxX = eb.cx
+        if      (eb.cy < minY) minY = eb.cy
+        else if (eb.cy > maxY) maxY = eb.cy
+        if (eb.len > maxL) maxL = eb.len
+        i += 1
+      }
+      ((maxX - minX).sq + (maxY - minY).sq)/(if (maxL < 1) 1 else maxL).sq >= minMove.sq
+    }
+    override def relocate(here: Path) = target
+    override def modifyBlobs() = true
+    override def blob(n: Int) = FromStore.Text{ txt =>
+      Blob.from(n, txt.lines, keepSkeleton = false) match {
+        case No(_) => Right(false)  // Silently drop problems (?!)
+        case Yes(b) =>
+          if (b.length == 0) Right(false)
+          else if (b(b.length-1).t - b.length < minTime) Right(false)
+          else if (!movedEnough(b)) Right(false)
+          else {
+            newID += 1
+            Left(Stored.Text((new Blob(newID)).loot(b).text()))
+          }
+      }
+    }
+  }
 }
 
 
@@ -128,12 +168,19 @@ object CopyTransform {
     } TossAs { e => safe{zos.close}; s"Could not open ${c.who}\n" + e.explain() }
 
     try {
-      var phase = 0
-      while (phase < 5) { 
-        phase += 1
-        phase match {
-          case 1 =>
-            if (!mod) {
+      if (!mod && c.summary.isDefined) {
+      }
+      else {
+        // Step 1--collect summary file information (to the extent that we have it)
+
+        // Step 2--process blobs, regenerating summary file
+
+        // Step 3--process summary file
+
+        // Step 4--process other files
+
+      }
+      /*
               val binaries: Iterator[Ok[String, (String, FileTime, Array[Byte])]] =
                 if (c.target.isZip) new Iterator[Ok[String, (String, FileTime, Array[Byte])]] {
                   private val pending = collection.mutable.HashSet(c.blobs: _*)
@@ -183,20 +230,7 @@ object CopyTransform {
                 zos.closeEntry()
               }}
             }
-            else {
-
-            }
-          case 2 => 
-            if (!mod && c.summary.isDefined) {
-
-            }
-            else {
-
-            }
-          case 3 => // Other phase
-          case _ => // Extra files phase
-        }
-      }
+            */
     }
     finally { 
       if (zf ne null) zf.close
