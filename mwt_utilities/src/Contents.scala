@@ -34,6 +34,42 @@ abstract class FilesVisitor {
   def noMoreOfTheseOthers(): Unit = {}
   def stop(): Unit = {}
 }
+object FilesVisitor {
+  def justSummary(callback: Array[Byte] => Unit): FilesVisitor = new FilesVisitor {
+    override def requestSummary = true
+    override def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(content)
+  }
+  def justBlobData(callback: (String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
+    override def requestBlobs = true
+    override def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(name, content)
+  }
+  def justImages(callback: (String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
+    override def requestImages = true
+    override def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = callback(name, content)
+  }
+  def justOthers(callback: (String, String, Array[Byte]) => Unit): FilesVisitor = new FilesVisitor {
+    override def requestOthers(category: String) = true
+    override def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = 
+      callback(category, name, content)
+  }
+
+  // TODO--move this to an actual toSet
+  object UnitTest {
+    class ByteCounter extends mwt.utilities.FilesVisitor {
+      var count: Long = 0L
+      override def requestBlobs = true
+      override def visitBlobData(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def requestSummary = true
+      override def visitSummary(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def requestImages = true
+      override def visitImage(name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+      override def requestOthers(category: String) = true
+      override def visitOther(category: String, name: String, modified: FileTime, content: Array[Byte]): Unit = { count += content.length }
+    }
+
+    // TODO--write a test!
+  }
+}
 
 case class Contents[A](who: Path, target: OutputTarget, baseString: String, base: A, summary: Option[String], blobs: Array[String], images: Array[String], others: Map[String, Array[String]]) {
   def visitAll(fv: FilesVisitor): Ok[String, Unit] = safe {
