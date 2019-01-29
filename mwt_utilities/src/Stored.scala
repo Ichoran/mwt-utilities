@@ -43,6 +43,9 @@ object Approximation {
   final def r4(x: Double): Double = 
     if (x < 0) { if (x < -1e11) x else (x*10000 - 0.5).toLong/1e4 }
     else       { if (x >  1e11) x else (x*10000 + 0.5).toLong/1e4 }
+  final def r5(x: Double): Double = 
+    if (x < 0) { if (x < -1e10) x else (x*100000 - 0.5).toLong/1e5 }
+    else       { if (x >  1e10) x else (x*100000 + 0.5).toLong/1e5 }
 
   final def c1(x: Double, y: Double): Boolean = (x-y).abs < 0.05
   final def c2(x: Double, y: Double): Boolean = (x-y).abs < 0.005

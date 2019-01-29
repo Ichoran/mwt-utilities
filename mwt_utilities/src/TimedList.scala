@@ -2,6 +2,8 @@ package mwt.utilities
 
 import java.lang.{ StringBuilder => JStringBuilder }
 
+import scala.reflect.ClassTag
+
 import kse.flow._
 import kse.maths._
 import kse.eio._
@@ -17,6 +19,43 @@ trait TimedList[E >: Null <: TimedElement] {
   final protected var myLines: Array[TimedElement] = null
   final protected var myLinesN: Int = 0
   final protected var myExtra = collection.mutable.TreeMap.empty[Double, E]
+
+  final def times(): Array[Double] = {
+    pack()
+    if (myLinesN < 1) new Array[Double](0)
+    else {
+      val a = new Array[Double](myLinesN)
+      var i = 0
+      while (i < a.length) {
+        a(i) = myLines(i).t
+        i += 1
+      }
+      a
+    }
+  }
+
+  final def arrayed[A: ClassTag](f: E => A): Array[A] = {
+    pack()
+    if (myLinesN < 1) new Array[A](0)
+    else {
+      val a = new Array[A](myLinesN)
+      var i = 0
+      while (i < a.length) {
+        a(i) = f(myLines(i).asInstanceOf[E])
+        i += 1
+      }
+      a
+    }
+  }
+
+  final def foreach(f: E => Unit): Unit = {
+    pack()
+    var i = 0
+    while (i < myLinesN) {
+      f(myLines(i).asInstanceOf[E])
+      i += 1
+    }
+  }
 
   final def loot(that: TimedList[E]): this.type = {
     myLines = that.myLines

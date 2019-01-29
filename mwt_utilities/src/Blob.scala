@@ -23,7 +23,7 @@ object Blob extends TimedListCompanion {
   type MyTimed = Blob
 
   class Entry(
-    val frame: Int,
+    var frame: Int,
     val t: Double, 
     val cx: Double, val cy: Double, val area: Int,
     val bx: Float, val by: Float, val len: Float, val wid: Float,
@@ -118,7 +118,7 @@ object Blob extends TimedListCompanion {
   }
   object Entry {
     private val noSkeleton = new Array[Int](0)
-    def parse(g: Grok, keepSkeleton: Boolean = true)(implicit fail: GrokHop[g.type]): Entry = {
+    def parse(g: Grok, keepSkeleton: Boolean = true, keepOutline: Boolean = true)(implicit fail: GrokHop[g.type]): Entry = {
       g.delimit(true, 0)
       val frame = g.I
       val t = g.D
@@ -150,7 +150,7 @@ object Blob extends TimedListCompanion {
       var ox: Short = 0
       var oy: Short = 0
       var opN = 0
-      if ((tok ne null) && tok == "%%") {
+      if ((tok ne null) && tok == "%%" && keepOutline) {
         g.skip
         val x = g.I
         val y = g.I
@@ -215,14 +215,14 @@ object Blob extends TimedListCompanion {
     }
   }
 
-  private def myGrokker(id: Int, keepSkeleton: Boolean): Grokker = new Grokker {
+  private def myGrokker(id: Int, keepSkeleton: Boolean, keepOutline: Boolean): Grokker = new Grokker {
     def title = "blob"
     def zero() = new Blob(id)
-    def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton)
+    def grok(g: Grok)(implicit gh: GrokHop[g.type]) = Entry.parse(g, keepSkeleton, keepOutline)
   }
 
-  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true): Ok[String, Blob] = 
-    myFrom(lines)(myGrokker(id, keepSkeleton))
+  def from(id: Int, lines: Vector[String], keepSkeleton: Boolean = true, keepOutline: Boolean = true): Ok[String, Blob] = 
+    myFrom(lines)(myGrokker(id, keepSkeleton, keepOutline))
 
   // TODO -- make a proper test of this
   object UnitTest {
