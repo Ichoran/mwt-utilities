@@ -9,8 +9,10 @@ import java.util.zip._
 import scala.collection.JavaConverters._
 
 import kse.flow._
+import kse.coll._
 import kse.eio._
 import kse.maths._
+import kse.maths.stats._
 
 
 abstract class BlobVisitor {
@@ -194,19 +196,21 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     fv.stop()
   }.mapNo(e => s"Could not visit MWT output\n${e.explain(24)}")
 
-  /*
+  
   def times(knownMax: Option[Double] = None, fromBlobs: Boolean = false): Ok[String, Array[Double]] =
     if (summary.isDefined && !fromBlobs) theSummary.map(_.times)
     else {
+      import Contents.TmFr
+
       // Timepoints we've witnessed (map to reported frame number and count delta)
-      val m = collection.mutable.HashMap.empty[Double, (Mu[Int], Mu[Int])]
+      val m = collection.mutable.HashMap.empty[Double, TmFr]
 
       // Inter-timepoint intervals we've witnessed (map to count of that interval)
       val dm = collection.mutable.HashMap.empty[Double, Mu[Int]]
       blobWalk(
         b => {
-          var prev: Double = 0
-          var t0: Double = Double.NaN
+          var prev: Double = Double.NegativeInfinity
+          var t0: Double = Double.NegativeInfinity
           b.foreach{ be =>
             if (prev > 0) {
               val delta = be.t - prev
@@ -215,17 +219,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             }
             else t0 = be.t
             prev = be.t
-            val (fr, n) = m.getOrElseUpdate(be.t, (Mu(0), Mu(0)))
-            if (fr.value = 0) fr.value = be.frame
-            else if (fr.value != be.frame) fr.value = -1
-            n.value = n.value + 1
+            m.getOrElseUpdate(be.t, TmFr.empty(be.t)).register(be.frame)
           }
-          if (t0.finite) {
-            val start = m(t0)
-            start._2.value = start._2.value + 1
-            val end = m(prev)
-            end._2.value = end._2.value - 1
-          }
+          m.get(t0).foreach(_.++)
+          m.get(prev).foreach(_.--)
         },
         false, false
       ).?
@@ -239,119 +236,39 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       if (!minDelta.finite || minDelta < 1e-5) return No(s"Blob data has impossibly small time increments")
 
-      // Sort by times
-      val sorted = m.toArray.sortBy(_._1)
-
-      // Remove overly close times (and mark that we aren't sure of the frame number)
-      var i = 1
-      var n = 0
-      while (i < sorted.length) {
-        if (sorted(i)._1 - sorted(n)._1 >= minDelta) {
-          n += 1
-          if (n < i) sorted(n) = sorted(i)
+      // Break apart into blocks of known sequential frames
+      val chunked = TmFr.fragment( TmFr.mergeClose(m.toArray.map(_._2).sorted, minDelta) ).pipe{ ch =>
+        knownMax match {
+          case Some(t) if (t - ch.last.last.time > 100*minDelta) => ch :+ Array(new TmFr(t, -1, 0, 0))
+          case _ => ch
         }
-        else {
-          if (sorted(n)._2._1.value != sorted(i)._2._1.value) sorted(n)._2._1.value = -1
-          sorted(n)._2._2.value = sorted(n)._2._2.value + sorted(i)._2._2.value
+      }
+
+      val flat = new Array[Double](chunked.last.last.frame)
+      var k = 0
+      var t = 0.0
+      var i = 0
+      while (i < chunked.length) {
+        val chi = chunked(i)
+        if (chi.head.frame - 1 > k) {
+          val dt = chi.head.time - t
+          while (k < chi.head.frame - 1) {
+            flat(k) = Approximation.r5(t + dt)
+            t += dt
+            k += 1
+          }
+        }
+        var j = 0
+        while (j < chi.length) {
+          flat(k) = chi(j).time
+          j += 1
+          k += 1
         }
         i += 1
       }
-      if (n < sorted.length) n += 1
-
-      // Make sure everything has enough space
-      i = 0
-      var j = 0
-      var used = 0
-      var fixed = 0
-      while (i < n) {
-        while (i < n && sorted(i)._2._1.value < 0) i += 1
-
-        i += 1
-      }
-
-      // Figure out whether we can create new spots to fix any non-consecutive numbering
-      var healable = false
-      var atLeast
-      var j = 0
-      while (j < n && !healable) { if (sorted(j)._2 > 0) healable = true; j += 1 }
-      if (healable && sorted(j)._2 < j) healable = false
-      i = j+1
-      /*
-      while (i < n && healable) {
-        if (sorted(i)._2 > 0) {
-          val dt = sorted(i)._1 - sorted(j)._1
-          val dn = sorted(i)._2 - sorted(j)._2
-          if (dn < i - j) healable = false
-          else if (minDelta > 0 && (dt/dn < 3*minDelta || dt/dn > 1000*minDelta)) healable = false
-          else j = i
-        }
-        i += 1
-      }
-      */
-
-      if (minDelta == 0 && !healable) No(s"Blob data inadequate to generate any reasonable summary")
-      else if (minDelta == 0) {
-        val ans = new Array[Double](n)
-        var i = 0
-        while (i < ans.length) {
-          ans(i) = sorted(i)._1
-          i += 1
-        }
-        Yes(ans)
-      }
-      else if (!healable) {
-        val ansb = Array.newBuilder[Double]
-        var i = 0
-        var t = 0.0
-        while (i < n) {
-          if (sorted(i)._1 - t > 50*minDelta) {
-            while (sorted(i)._1 - t > 15*minDelta) { t += 10*minDelta; ansb += Approximation.r5(t) }
-          }
-          ansb += sorted(i)._1
-          i += 1
-        }
-        knownMax.foreach{ mt =>
-          while (mt - t > 15*minDelta) { t += 10*minDelta; ansb += Approximation.r5(t) }
-        }
-        Yes(ansb.result)
-      }
-      else {
-        val ansb = Array.newBuilder[Double]
-        var i = 0
-        var j = -1
-        var t = 0.0
-        var scratch = Contents.emptyDoubleArray
-        while({while (i < n && sorted(i)._2 < 1) i += 1; i < n}) {
-          val dt = sorted(i)._1 - t
-          val dn = sorted(i)._2 - (if (j < 0) 0 else sorted(j)._2)
-          if (dn == i - j) {
-            while (j < i) { j += 1; ansb += sorted(j)._1 }
-          }
-          else if (i - j == 1) {
-            var k = 1
-            val inc = dt/dn
-            while (k < dn) { ansb += Approximation.r5(t + k*inc); k += 1 }
-            ansb += sorted(i)._1
-            j = i
-          }
-          else {
-            if (scratch.length < dn) scratch = new Array[Double](dn)
-            scratch(dn - 1) = sorted(i)._1
-            Contents.placeEvenly(scratch, t, 0, dn - 1, sorted, j+1, i-1)
-            var k = 0
-            while (k < dn) { ansb += scratch(k); k += 1 }
-            j = i
-          }
-          t = sorted(i)._1
-          i += 1
-        }
-        knownMax.foreach{ mt =>
-          while (mt - t > 15*minDelta) { t += 10*minDelta; ansb += Approximation.r5(t) }
-        }
-        Yes(ansb.result)
-      }
+      Yes(flat)
     }
-  */
+
 
   def summaryWalk[U](f: String => U): Ok[String, Unit] =
     if (summary.isEmpty) No(s"No summary file in $who")
@@ -586,6 +503,9 @@ object Contents {
       else if (time.finite && time > that.time) 1
       else -1
 
+    def --(): this.type = { delta -= 1; this }
+    def ++(): this.type = { delta += 1; this }
+
     def register(fr: Int): this.type = {
       if (frame == 0) frame = fr
       else if (frame != fr) frame = -1
@@ -603,67 +523,128 @@ object Contents {
   }
   private[utilities] object TmFr {
     def empty(time: Double) = new TmFr(time, 0, 0, 0)
+
+    def fragment(xs: Array[TmFr]): Array[Array[TmFr]] = {
+      val xssb = Array.newBuilder[Array[TmFr]]
+      var i = 0
+      while (i < xs.length) {
+        var cuml = xs(i).delta
+        var j = i+1
+        while (cuml > 0 && j < xs.length) {
+          cuml += xs(j).delta
+          j += 1
+        }
+        xssb += java.util.Arrays.copyOfRange(xs, i, j)
+        i = j
+      }
+      xssb.result
+    }
+
+    def distribute(ts: Array[Double], n: Int): Array[Int] = {
+      var tsum = 0.0
+      var i = 0
+      while (i < ts.length) { tsum += ts(i); i += 1 }
+      var nsum = n
+      val ns = new Array[Int](ts.length)
+      i = 0
+      while (i < ts.length) {
+        val frac = if (tsum == 0) 1.0 else ts(i)/tsum
+        tsum -= ts(i)
+        ns(i) = (n*frac).rint.toInt.clip(1, nsum - (ns.length - i - 1))
+        nsum -= ns(i)
+        i += 1 
+      }
+      if (nsum > 0) ns(ns.length-1) += nsum
+      ns
+    }
+
+    def unifyInPlace(xs: Array[TmFr], lowestPossibleFrame: Int = 1) {
+      val e = EstM()
+      var i = 0
+      while (i < xs.length) { if (xs(i).framed) e += xs(i).frame - i; i += 1 }
+      val zero = (if (e.n > 0) e.mean.rint.toInt else 1) max lowestPossibleFrame
+      i = 0
+      while (i < xs.length) { 
+        xs(i).frame = zero + i
+        i += 1
+      }
+    }
+
+    def unifyInPlace(xss: Array[Array[TmFr]], delta: Double): Ok[String, Unit] = {
+      var i = 0
+      var minFr = 1
+      while (i < xss.length) {
+        var framed = false
+        val xsi = xss(i)
+        var k = 0
+        while (!framed && k < xsi.length) { framed = xsi(k).framed; k += 1 }
+        if (framed) {
+          unifyInPlace(xsi, lowestPossibleFrame = minFr)
+          minFr = xsi.last.frame + 1
+          var j = i-1
+          var nFr = 0
+          while (j >= 0 && !xss(j).head.framed) { nFr += xss(j).length; j -= 1 }
+          if (i-j > 1) {
+            val gapT = {
+              val ans = new Array[Double](i-j)
+              var k = j
+              while (k < i) {
+                ans(k - j) = xss(j+1).head.time - (if (j >= 0) xss(j).last.time else 0.0)
+                if (ans(k-j) <= 0) return No(s"Blobs have negative time interval around ${xss(j+1).head.time}")
+                k += 1
+              }
+              ans
+            }
+            val nUnassigned = xss(i).head.frame - (if (j >= 0) xss(j).last.frame else 0)
+            val gapN = distribute(gapT, nUnassigned - nFr + gapT.length - 1)
+            k = j+1
+            while (k < i) {
+              val nStart = (if (k > 0) xss(k-1).last.frame else 0) + gapN(k-j-1)
+              unifyInPlace(xss(i), lowestPossibleFrame = nStart)
+              k += 1
+            }
+          }
+        }
+        else minFr += xsi.length
+      }
+      if (xss.length > 0 && !xss.last.head.framed) {
+        i = xss.length-1
+        while (i >= 0 && !xss(i).head.framed) i -= 1
+        var lastN = (if (i >= 0) xss(i).last.frame else 0)
+        var lastT = (if (i >= 1) xss(i).last.time  else 0)
+        i += 1
+        while (i < xss.length) {
+          val xsi = xss(i)
+          val dt = xsi.head.time - lastT
+          val dn = (if (delta > 0) (dt/delta).floor.toInt else 1) max 1
+          unifyInPlace(xsi, lowestPossibleFrame = lastN + dn)
+          lastN = xsi.last.frame
+          lastT = xsi.last.time
+          i += 1
+        }
+      }
+      Ok.UnitYes
+    }
+
+    def mergeClose(xs: Array[TmFr], minDelta: Double): Array[TmFr] = {
+      // Remove overly close times (and mark that we aren't sure of the frame number)
+      var i = 1
+      var n = 0
+      while (i < xs.length) {
+        if (xs(i).time - xs(n).time >= minDelta) {
+          n += 1
+          if (n < i) xs(n) = xs(i)
+        }
+        else xs(n) += xs(i)
+        i += 1
+      }
+      if (n < xs.length) n += 1
+      if (n < xs.length) java.util.Arrays.copyOf(xs, n) else xs
+    }
   }
 
   private[utilities] val emptyDoubleArray = new Array[Double](0)
 
-  private[utilities] def placeEvenly(target: Array[Double], t: Double, i0: Int, iN: Int, source: Array[(Double, Int)], j0: Int, j1: Int) {
-    val tN = target(iN)
-    val tStepN = 1 + iN - i0
-    val tStep = (tN - t)/(tStepN max 1)
-    if (tStep < 0) Bad(s"WTF?!  tStep=$tStep at $i0 $iN")
-    if (j0 > j1) {
-      // Fill in any missing spots evenly
-      if (i0 < iN) {
-        var k = i0
-        while (k < iN) { target(k) = Approximation.r5(t + tStep*(k - i0 + 1)); k += 1 }
-        if (target(iN-1) > target(iN)) Bad(s"WTF?!  Overshoot at ${iN-1}: ${target(iN-1)} to ${target(iN)}")
-        if (i0 > 0 && (target(i0-1) > target(i0))) Bad(s"WTF?!  Undershoot at $i0: ${target(i0-1)} to ${target(i0)} maybe because $t")
-      }      
-    }
-    else if (iN - i0 == 1 + j1 - j0) {
-      // Same number in source and target, just copy over
-      var i = i0
-      var j = j0
-      while (i < iN) {
-        target(i) = source(j)._1
-        i += 1
-        j += 1
-      }
-      if (i0 > 0 && (target(i0-1) > target(i0))) Bad(s"WTF?!  Copy undershoot at $i0: ${target(i0-1)} to ${target(i0)}")
-      if (iN > 0 && (target(iN-1) > target(iN))) Bad(s"WTF?!  Copy overshoot at ${iN-1}: ${target(iN-1)} to ${target(iN)}")
-    }
-    else {
-      // Pick central-most source element, place, and recurse on either side
-      val j = (j0 + j1) >>> 1
-      val tj = source(j)._1
-      var i = ((tj - t)/tStep).rint.toInt - 1
-      if (i < j - j0) i = j-j0
-      if (i > (iN - i0) - (j1 - j)) i = (iN - i0) - (j1 - j)
-      i += i0
-      if (i < i0) i = i0
-      if (i >= iN) i = iN - 1
-      target(i) = tj
-      try {
-        if (i0  < i)  placeEvenly(target, t,  i0,  i,  source, j0,  j-1)
-      }
-      catch {
-        case b: Bad => Bad(s"Bad in leading range $i0 to $i with $t\n" + b.getMessage)
-      }
-      try {
-        if (i+1 < iN) placeEvenly(target, tj, i+1, iN, source, j+1, j1)
-      }
-      catch {
-        case b: Bad => Bad(s"Bad in trailing range ${i+1} to $iN with $tj\n" + b.getMessage)
-      }
-      if (i > 0 && target(i-1) > target(i)) Bad(s"Central target underflow at $i: ${target(i-1)} to ${target(i)}")
-      if (i < iN && target(i) > target(i+1)) Bad(s"Central target overflow at $i: ${target(i)} to ${target(i+1)}")
-    }
-  }
-
-  /*
-  private[utilities] def groupConsecutive
-  */
 
   def clipOffDir(s: String): String = {
     val i = s.lastIndexOf('/')
@@ -757,33 +738,5 @@ object Contents {
   }
 
   object UnitTest {
-    def test_place_evenly(): Ok[String, Unit] = {
-      val r = new kse.maths.stochastic.Pcg64
-      val target = new Array[Double](10)
-      def reset() { for (i <- target.indices) target(i) = Double.NaN }
-
-      reset()
-      val source = new Array[(Double, Int)](10)
-      for (i <- source.indices) source(i) = (2*(i+1) + r.D - 0.5, i+1)
-      target(target.length-1) = source(source.length-1)._1
-      placeEvenly(target, 0, 0, target.length-1, source, 0, source.length-2)
-      for (i <- target.indices) if (target(i) != source(i)._1) return No(s"Same-length copy failed on index $i")
-
-      reset()
-      val src2 = source.zipWithIndex.collect{ case (e, i) if (i%2) == 1 => e }
-      target(target.length-1) = src2(src2.length-1)._1
-      placeEvenly(target, 0, 0, target.length-1, src2, 0, src2.length-2)
-      for (i <- target.indices) {
-        if ((i%2) == 1) { 
-          if (target(i) != src2(i/2)._1) 
-            return No(s"Half-length copy spread incorrectly on index $i\n  Full output: ${target.mkString(", ")}") 
-        }
-        else { 
-          if ((target(i)-source(i)._1).abs > 1) 
-            return No(s"Interpolation botched on index $i: found ${target(i)} but original was ${source(i)._1}\n  Full output: ${target.mkString(", ")}") 
-        }
-      }
-      Ok.UnitYes
-    }
   }
 }
