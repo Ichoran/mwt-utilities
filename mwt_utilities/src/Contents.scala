@@ -214,7 +214,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           b.foreach{ be =>
             if (prev > 0) {
               val delta = be.t - prev
-              val x = dm.getOrElse(delta, Mu(0))
+              val x = dm.getOrElseUpdate(delta, Mu(0))
               x.value = x.value + 1
             }
             else t0 = be.t
@@ -226,6 +226,8 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         },
         false, false
       ).?
+
+      if (m.size == 0) return Yes(Contents.emptyDoubleArray)
 
       // Find a reasonable lower bound time between frames
       val minDelta = dm.toArray.sortBy(_._1).pipe{ am =>
@@ -251,7 +253,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       while (i < chunked.length) {
         val chi = chunked(i)
         if (chi.head.frame - 1 > k) {
-          val dt = chi.head.time - t
+          val dt = (chi.head.time - t)/(chi.head.frame - k)
           while (k < chi.head.frame - 1) {
             flat(k) = Approximation.r5(t + dt)
             t += dt
