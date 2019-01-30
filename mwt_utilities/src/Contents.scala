@@ -497,7 +497,7 @@ object Contents {
   }
 
   private[utilities] class TmFr(val time: Double, var frame: Int, var count: Int, var delta: Int)
-  extends scala.math.Ordered[TmFr] {
+  extends scala.math.Ordered[TmFr] with Cloneable {
     def framed = frame > 0
 
     def compare(that: TmFr): Int =
@@ -522,8 +522,19 @@ object Contents {
       delta += that.delta
       this
     }
+
+    override def clone(): TmFr = new TmFr(time, frame, count, delta)
+
+    override def toString: String = s"$time/$frame/$count/$delta"
+
+    override def equals(a: Any) = a match {
+      case that: TmFr => time == that.time && frame == that.frame && count == that.count && delta == that.delta
+      case _ => false
+    }
   }
   private[utilities] object TmFr {
+    def apply(time: Double, frame: Int, count: Int, delta: Int) = new TmFr(time, frame, count, delta)
+
     def empty(time: Double) = new TmFr(time, 0, 0, 0)
 
     def fragment(xs: Array[TmFr]): Array[Array[TmFr]] = {
@@ -602,12 +613,13 @@ object Contents {
             k = j+1
             while (k < i) {
               val nStart = (if (k > 0) xss(k-1).last.frame else 0) + gapN(k-j-1)
-              unifyInPlace(xss(i), lowestPossibleFrame = nStart)
+              unifyInPlace(xss(k), lowestPossibleFrame = nStart)
               k += 1
             }
           }
         }
         else minFr += xsi.length
+        i += 1
       }
       if (xss.length > 0 && !xss.last.head.framed) {
         i = xss.length-1
@@ -642,6 +654,63 @@ object Contents {
       }
       if (n < xs.length) n += 1
       if (n < xs.length) java.util.Arrays.copyOf(xs, n) else xs
+    }
+
+
+    object UnitTest {
+      def test_distribute(): Ok[String, Unit] = {
+        distribute(Array(1, 1, 1, 1, 1), 5).toVector.okIf(_ == Vector(1, 1, 1, 1, 1)) TossAs (v => s"Not 1,1,1,1,1: $v")
+        distribute(Array(1, 5), 3).toVector.okIf(_ == Vector(1, 2)) TossAs (v => s"Not 1,2: $v")
+        distribute(Array(9, 1), 3).toVector.okIf(_ == Vector(2, 1)) TossAs (v => s"Not 2,1: $v")
+        distribute(Array(1, 1.1), 3).toVector.okIf(_ == Vector(1, 2)) TossAs (v => s"Not 1,2: $v")
+        distribute(Array(1.1, 1), 3).toVector.okIf(_ == Vector(2, 1)) TossAs (v => s"Not 2,1: $v")
+        Ok.UnitYes
+      }
+      def test_fragment(): Ok[String, Unit] = {
+        val source = Array(
+          TmFr(1, 16, 1, 1), TmFr(2, 17, 1, 0), TmFr(3, 18, 1, -1),
+          TmFr(5, 20, 2, 0),
+          TmFr(7, 22, 1, 1), TmFr(8, 23, 2, 1), TmFr(9, 24, 3, 1), TmFr(10, 25, 4, -3),
+          TmFr(12, 27, 1, 0)
+        )
+        val frag = fragment(source)
+        lazy val frs = frag.map(_.mkString(", ")).mkString("\n")
+        if (frag.length != 4)
+          No(s"Should have had 4 lines, but was\n$frs")
+        else if (frag.map(_.length).toVector != Vector(3, 1, 4, 1)) 
+          No(s"Should have had lengths 3, 1, 4, 1, but was\n$frs")
+        else if (frag.flatten.map(_.frame).toVector != Vector(16, 17, 18, 20, 22, 23, 24, 25, 27))
+          No(s"Should have had frames\n16 17 18\n20\n22 23 24 25\n27, but was\n$frs")
+        else Ok.UnitYes
+      }
+      def test_unifyInPlace(): Ok[String, Unit] = {
+        val source = Array(
+          Array(TmFr(6, -1, 1, 0)),
+          Array(TmFr(11, 16, 1, 1), TmFr(12, 17, 1, 0), TmFr(13, 18, 1, -1)),
+          Array(TmFr(15, 20, 2, 0)),
+          Array(TmFr(17, -1, 1, 1), TmFr(18, -1, 2, 1), TmFr(19, -1, 3, 1), TmFr(20, -1, 4, -3)),
+          Array(TmFr(22, 27, 1, 0)),
+          Array(TmFr(24, -1, 2, 0))
+        )
+        val fixed = source.map(si => si.map(_.clone))
+        lazy val fxs = fixed.map(_.mkString(" ")).mkString("\n")
+        unifyInPlace(fixed, 1)
+        (source zip fixed).okIf(_.forall(sf => sf._1.length == sf._2.length)) TossAs (_ => s"Changed structure:\n$fxs")
+        (source(1) zip fixed(1)).okIf(_.forall(sf => sf._1 == sf._2)) TossAs (_ => s"Changed second line:\n$fxs")
+        (source(2) zip fixed(2)).okIf(_.forall(sf => sf._1 == sf._2)) TossAs (_ => s"Changed third line:\n$fxs")
+        (source(4) zip fixed(4)).okIf(_.forall(sf => sf._1 == sf._2)) TossAs (_ => s"Changed fifth line:\n$fxs")
+        fixed(0)(0).okIf(_.frame in (7, 9)) TossAs (x => s"Frame out of range in $x; overall:\n$fxs")
+        fixed(3).okIf(_.map(_.frame).toVector == (22 to 25)) TossAs (x => s"Frames not in 22 to 25 in ${x.mkString(" ")}; overall:\n$fxs")
+        fixed(5)(0).okIf(_.frame == 29) TossAs (x => s"Frame not 29 in $x; overall:\n$fxs")
+        Ok.UnitYes
+      }
+      def test_all(): Ok[Vector[String], Unit] = {
+        val errors = Vector.newBuilder[String]
+        test_distribute().foreachNo(errors += _)
+        test_fragment().foreachNo(errors += _)
+        test_unifyInPlace().foreachNo(errors += _)
+        errors.result.okIf(_.isEmpty).map(_ => ())
+      }
     }
   }
 
@@ -740,5 +809,11 @@ object Contents {
   }
 
   object UnitTest {
+    def test_TmFr(): Ok[String, Unit] = TmFr.UnitTest.test_all().mapNo(_.mkString("TmFr tests:\n", "\n---\n", "\nEnd TmFr\n\n"))
+    def test_all(): Ok[Vector[String], Unit] = {
+      val errors = Vector.newBuilder[String]
+      test_TmFr().foreachNo(errors += _)
+      errors.result.okIf(_.isEmpty).map(_ => ())
+    }
   }
 }
