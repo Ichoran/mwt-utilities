@@ -112,6 +112,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitBlobData(bze.getName, bze.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(bze).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(bze).slurp.?)
+              case e: FromStore.Empty[_]  => e()
             }
           }
           fv.noMoreBlobs()
@@ -121,6 +122,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             case Some(ze) => fv.visitSummary(ze.getName, ze.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+              case e: FromStore.Empty[_]  => e()
             }
             case None     => fv.noSummary()
           }
@@ -130,6 +132,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitBlobData(ize.getName, ize.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(ize).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(ize).slurp.?)
+              case e: FromStore.Empty[_]  => e()
             }
           }
         }
@@ -137,8 +140,9 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           if (fv.requestOthers(ext) && zes.nonEmpty) {
             zes.foreach{ ze =>
               fv.visitOther(ext, ze.getName, ze.getLastModifiedTime) match {
-               case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
-               case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+                case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
+                case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+                case e: FromStore.Empty[_]  => e()
               }
             }
             fv.noMoreOfTheseOthers()
@@ -154,6 +158,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           fv.visitBlobData(blob, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            case e: FromStore.Empty[_]  => e()
           }
         }
         fv.noMoreBlobs()
@@ -165,6 +170,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitSummary(s, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+              case e: FromStore.Empty[_]  => e()
             }
           case None =>
             fv.noSummary()
@@ -176,6 +182,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           fv.visitImage(image, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            case e: FromStore.Empty[_]  => e()
           }
         }
         fv.noMoreImages()
@@ -187,6 +194,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitOther(ext, f, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+              case e: FromStore.Empty[_]  => e()
             }
           }
           fv.noMoreOfTheseOthers()
@@ -493,20 +501,20 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           if (zes eq null) zes = zf.entries.asScala.toArray
           zes.foreach{ ze =>
             if (fileSet contains ze.getName) acceptor(ze.getName) match {
-              case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(zf.getInputStream(ze).gulp.?))
-              case ft: FromStore.Text[Unit]    => ft(Stored.Text(zf.getInputStream(ze).slurp.?))
+              case fb: FromStore.Binary[Unit]  => fb(zf.getInputStream(ze).gulp.?)
+              case ft: FromStore.Text[Unit]    => ft(zf.getInputStream(ze).slurp.?)
+              case fe: FromStore.Empty[Unit]   => fe()
             }
           }
         }
         else {
           aFor(files){ (file, i) => acceptor(file) match {
-            case fb: FromStore.Binary[Unit]  => fb(Stored.Binary(Files.readAllBytes(who resolve file)))
-            case ft: FromStore.Text[Unit] => 
-              ft(Stored.Text({ 
-                val vb = Vector.newBuilder[String]
-                Files.lines(who resolve file).forEach(vb += _)
-                vb.result
-              }))
+            case fb: FromStore.Binary[Unit] => fb(Files.readAllBytes(who resolve file))
+            case ft: FromStore.Text[Unit]   =>
+              val vb = Vector.newBuilder[String]
+              Files.lines(who resolve file).forEach(vb += _)
+              ft(vb.result)
+            case fe: FromStore.Empty[Unit]  => fe()
           }
         }}
       }

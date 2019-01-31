@@ -3,13 +3,29 @@ package mwt.utilities
 
 sealed abstract class Stored {}
 object Stored {
-  final case class Text(lines: Vector[String]) extends Stored {}
-  final case class Binary(data: Array[Byte]) extends Stored {}
+  sealed trait Data extends Stored {}
+  final case class Text(lines: Vector[String]) extends Data {}
+  final case class Binary(data: Array[Byte]) extends Data {}
+  final case object Empty extends Stored {}
 }
 
 sealed abstract class FromStore[+Z] {}
 object FromStore {
   sealed trait Transformative {}
+
+  trait Empty[+Z] extends FromStore[Z] {
+    def apply(e: Stored.Empty.type): Z
+    final def apply(): Z = apply(Stored.Empty)
+    final def asIfData[Y](f: Z => Either[Stored.Data, Y], postText: Text[Y], postBin: Binary[Y]): Empty[Y] = e => f(apply(e)) match {
+      case Left(t: Stored.Text)   => postText(t)
+      case Left(b: Stored.Binary) => postBin(b)
+      case Right(y)               => y
+    }
+  }
+  object Empty {
+    def to[Z](z: => Z) = new Empty[Z] { def apply(e: Stored.Empty.type) = z }
+    def apply[Z](e: Empty[Z]) = e
+  }
 
   trait Text[+Z] extends FromStore[Z] { 
     def apply(t: Stored.Text): Z
@@ -17,6 +33,11 @@ object FromStore {
     final def branch[Y](f: Z => Either[Stored.Text, Y], post: Text[Y]): Text[Y] = txt => f(apply(txt)) match {
       case Left(t)  => post(t)
       case Right(y) => y
+    }
+    final def branch[Y](f: Z => Either[Stored.Data, Y], postText: Text[Y], postBin: Binary[Y]): Text[Y] = txt => f(apply(txt)) match {
+      case Left(t: Stored.Text)   => postText(t)
+      case Left(b: Stored.Binary) => postBin(b)
+      case Right(y)               => y
     }
   }
   object Text { 
@@ -34,6 +55,11 @@ object FromStore {
       case Left(b)  => post(b)
       case Right(y) => y
     }
+    final def branch[Y](f: Z => Either[Stored.Data, Y], postBin: Binary[Y], postText: Text[Y]): Binary[Y] = bin => f(apply(bin)) match {
+      case Left(t: Stored.Text)   => postText(t)
+      case Left(b: Stored.Binary) => postBin(b)
+      case Right(y)               => y
+    }
   }
   object Binary{ 
     def apply[Z](b: Binary[Z]) = b
@@ -44,10 +70,10 @@ object FromStore {
   }
 
   trait All[+Z] extends Text[Z] with Binary[Z] {
-    def from(s: Stored): Z
-    final def apply(s: Stored): Z = from(s)
-    final def apply(t: Stored.Text) = from(t)
-    final def apply(b: Stored.Binary) = from(b)
+    def from(s: Stored.Data): Z
+    final def apply(s: Stored.Data): Z = from(s)
+    final def apply(t: Stored.Text): Z = from(t)
+    final def apply(b: Stored.Binary): Z = from(b)
   }
   object All{ def apply[Z](a: All[Z]) = a }
 }

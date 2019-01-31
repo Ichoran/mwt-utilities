@@ -206,28 +206,62 @@ object CopyTransform {
         }
       }
 
-      c.visitAll(
-       if (!mod && c.summary.isDefined) new FilesVisitor {
-          override def requestBlobs = true
-          override def visitBlobData(name: String, modified: FileTime) = bincopy(name, modified)
-          override def requestSummary = true
-          override def visitSummary(name: String, modified: FileTime) = ct.summary() match {
-            case Some(xf) => xf andThen txtcopy(name, modified)
-            case _        => bincopy(name, modified)
+      abstract class MyVisitor extends FilesVisitor {
+        override def requestImages = true
+        override def visitImage(name: String, modified: FileTime) = ct.image(name).
+          branch(_.toOk.swap.toEither, bincopy(name, modified))
+        override def requestOthers(category: String) = true
+        private[this] val myCategoryCache = collection.mutable.HashMap.empty[String, Option[String => FromStore[Option[Stored]]]]
+        override def visitOther(category: String, name: String, modified: FileTime) = {
+          myCategoryCache.getOrElseUpdate(category, ct.other(category)) match {
+            case Some(f) => f(name) match {
+              case fb: FromStore.Binary[Option[Stored]] => fb.branch(
+                os => os match {
+                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                  case _                      => Right(())
+                },
+                bincopy(name, modified),
+                txtcopy(name, modified)
+              )
+              case ft: FromStore.Text[Option[Stored]]   => ft.branch(
+                os => os  match {
+                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                  case _                      => Right(())
+                },
+                txtcopy(name, modified),
+                bincopy(name, modified)
+              )
+              case fe: FromStore.Empty[Option[Stored]]  => fe.asIfData(
+                os => os  match {
+                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                  case _                      => Right(())
+                },
+                txtcopy(name, modified),
+                bincopy(name, modified)
+              )
+            }
+            case _       => FromStore.Empty(_ => ())
           }
-          override def requestImages = true
-          override def visitImage(name: String, modified: FileTime) = bincopy(name, modified)
-          override def requestOthers(category: String) = true
-          override def visitOther(category: String, name: String, modified: FileTime) = bincopy(name, modified)
+          bincopy(name, modified)
         }
-        else new FilesVisitor {
-          /*
-          val mai: Mu[Option[Array[Int]]] = Mu(None)
-          val times = c.times(saveTransitions = mai)
-          override def requestBlobs = true
-          */
+      }
+
+      
+      if (!mod && c.summary.isDefined) c.visitAll(new MyVisitor {
+        override def requestBlobs = true
+        override def visitBlobData(name: String, modified: FileTime) = bincopy(name, modified)
+        override def requestSummary = true
+        override def visitSummary(name: String, modified: FileTime) = ct.summary() match {
+          case Some(xf) => xf andThen txtcopy(name, modified)
+          case _        => bincopy(name, modified)
         }
-      )
+      })
+      else {
+        ???
+      }
     }
     finally {
       if (zos ne null) zos.close
