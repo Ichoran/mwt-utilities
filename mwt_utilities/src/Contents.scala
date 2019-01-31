@@ -197,10 +197,35 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
   }.mapNo(e => s"Could not visit MWT output\n${e.explain(24)}")
 
   
-  def times(knownMax: Option[Double] = None, fromBlobs: Boolean = false): Ok[String, Array[Double]] =
-    if (summary.isDefined && !fromBlobs) theSummary.map(_.times)
+  def times(knownMax: Option[Double] = None, fromBlobs: Boolean = false, saveTransitions: Option[Mu[Option[Array[Int]]]] = None): Ok[String, Array[Double]] =
+    if (summary.isDefined && !fromBlobs) theSummary.map{ s =>
+      saveTransitions.foreach{ mai =>
+        val tr = Array.newBuilder[Int]
+        var i = 0
+        while (i < s.length) {
+          val e = s(i)
+          if (e.findLoss ne null) {
+            val fl = e.findLoss
+            var j = 0
+            while (j + 1 < fl.length) {
+              if (fl(j) > 0 && fl(j+1) > 0) {
+                tr += i + 1
+                tr += fl(j)
+                tr += fl(j+1)
+              }
+              j += 2
+            }
+          }
+          i += 1
+        }
+        mai.value = Some(tr.result)
+      }
+      s.times
+    }
     else {
       import Contents.TmFr
+
+      saveTransitions.foreach{ mai => mai.value = None }
 
       // Timepoints we've witnessed (map to reported frame number and count delta)
       val m = collection.mutable.HashMap.empty[Double, TmFr]
@@ -744,7 +769,7 @@ object Contents {
     }
   }
 
-  def from[A](p: Path, parser: String => Ok[String, A] = (s: String) => Ok.UnitYes, debug: Boolean = true): Ok[String, Contents[A]] = {
+  def from[A](p: Path, parser: String => Ok[String, A] = (s: String) => Ok.UnitYes): Ok[String, Contents[A]] = {
     val target = OutputTarget.from(p, true) TossAs (e => s"Not a MWT output target:\n$e")
     val listing = safe {
       val ab = Array.newBuilder[String]

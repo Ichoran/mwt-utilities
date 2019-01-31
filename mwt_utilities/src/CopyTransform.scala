@@ -3,6 +3,7 @@ package mwt.utilities
 import java.io._
 import java.nio.file._
 import java.nio.file.attribute.FileTime
+import java.nio.charset.StandardCharsets.UTF_8
 import java.time._
 import java.util.zip._
 
@@ -52,9 +53,20 @@ class ContentsTransformer[A] {
 
   /** This is called when there is a summary file to get a transformer from old to new summary file contents.
     * Note that the data passed in here will have been generated from blob data if the summary file needed to
-    * be generated, or if the blobs were changed/renumbered (and therefore the summary file needed modification too)
+    * be generated, or if the blobs were changed/renumbered (and therefore the summary file needed modification too).
+    * If `None`, the summary file will not be changed.
     */
-  def summary(): FromStore[Stored] = FromStore.All(x => x)
+  def summary(): Option[FromStore.Text.Transform] = None
+
+  /** This is called on each image file to get a transformer from old to new image contents.
+    * Image files can be deleted a `None` is produced by the `FromStore`.
+    */
+  def image(name: String): FromStore.Binary[Option[Stored.Binary]] = FromStore.Binary(x => Some(x))
+
+  /** This is called after all existing image files have been seen.  The iterator can create new
+    * image files.
+    */
+  def stopImages(): Iterator[(String, Stored.Binary)] = Iterator.empty
 
   /** This is called to handle each category of other kinds of file.  If `None` is given, then the files
     * are all skipped.  Otherwise, each filename is passed into the function to return an appropriate handler
@@ -134,18 +146,15 @@ object CopyTransform {
 
     val zip = ct.toZip()
     val whoName = c.who.getFileName.toString pipe { name =>
-      if (prefix == c.target.prefix) name
-      else {
-        val bits = name.split('_')
-        val stamp = (if (bits.length <= 2) name else name.takeRight(2).mkString("_"))
-        val ans = prefix match {
-          case None    => stamp
-          case Some(p) => p + "_" + stamp
-        }
-        if (zip == c.target.isZip) ans
-        else if (zip)              ans + ".zip"
-        else                       ans.dropRight(4)
+      val bits = name.split('_')
+      val stamp = (if (bits.length <= 2) name else bits.takeRight(2).mkString("_"))
+      val ans = prefix match {
+        case None    => stamp
+        case Some(p) => p + "_" + stamp
       }
+      if (zip == c.target.isZip) ans
+      else if (zip)              ans + ".zip"
+      else                       ans.dropRight(4)
     }
     var tempName = (if (atomically) whoName + ".atomic" else whoName)
 
@@ -157,86 +166,75 @@ object CopyTransform {
 
     val mod = ct.modifyBlobs
 
-    val zos = safe {
-      if (zip) new ZipOutputStream(new FileOutputStream(target.toFile))
+    val zos: ZipOutputStream = safe {
+      if (zip) (new ZipOutputStream(new FileOutputStream(target.toFile))).tap(_.setLevel(7))
       else (Files createDirectories target) pipe (_ => null)
     } TossAs (s"Could not write $target\n" + _.explain())
 
-    val zf = safe {
-      if (c.target.isZip) new ZipFile(c.who.toFile)
-      else null
-    } TossAs { e => safe{zos.close}; s"Could not open ${c.who}\n" + e.explain() }
-
     try {
-      if (!mod && c.summary.isDefined) {
+      def newName(name: String) = {
+        val i = name.lastIndexOf(c.baseString)
+        if (i < 0) throw new IllegalArgumentException(s"Could not find ${c.baseString} in filename $name")
+        baseString + name.substring(i + c.baseString.length)
       }
-      else {
-        // Step 1--collect summary file information (to the extent that we have it)
-
-        // Step 2--process blobs, regenerating summary file
-
-        // Step 3--process summary file
-
-        // Step 4--process other files
-
+      def bincopy(name: String, modified: FileTime) = FromStore.Binary[Unit]{ b =>
+        if (zos eq null) {
+          val p = target resolve newName(name)
+          Files.write(p, b.data)
+          Files.setLastModifiedTime(p, modified)
+        }
+        else {
+          val e = new ZipEntry(whoName.dropRight(4) + "/" + newName(name))
+          e.setLastModifiedTime(modified)
+          zos.putNextEntry(e)
+          zos.write(b.data)
+          zos.closeEntry
+        }
       }
-      /*
-              val binaries: Iterator[Ok[String, (String, FileTime, Array[Byte])]] =
-                if (c.target.isZip) new Iterator[Ok[String, (String, FileTime, Array[Byte])]] {
-                  private val pending = collection.mutable.HashSet(c.blobs: _*)
-                  private val zen = zf.entries.asScala
-                  private var oze: Option[ZipEntry] = None
-                  private var complete = false
-                  def hasNext: Boolean =
-                    if (complete) false
-                    else if (oze.isDefined) true
-                    else {
-                      while (zen.hasNext && !oze.isDefined) {
-                        val ze = zen.next
-                        if (pending contains ze.getName) {
-                          oze = Some(ze)
-                          pending - ze.getName
-                        }
-                      }
-                      if (oze.isEmpty && !zen.hasNext) complete = true
-                      !complete
-                    }
-                  def next(): Ok[String, (String, FileTime, Array[Byte])] = {
-                    if (!hasNext || !oze.isDefined) return No(s"Tried to get next blob file in ${c.who} but there was none")
-                    val ze = oze.get
-                    oze = None
-                    val i = ze.getName.lastIndexOf('\\')
-                    val j = ze.getName.lastIndexOf('/')
-                    val k = (if (i < 0) j else if (j < 0) i else i max j)
-                    val nm = if (k < 0) ze.getName else ze.getName.substring(k+1)
-                    zf.getInputStream(ze).gulp.map(bytes => (nm, ze.getLastModifiedTime, bytes))
-                  }
-                }
-                else c.blobs.iterator.map{ b => 
-                  val p = c.who resolve b
-                  val t = Files.getLastModifiedTime(p)
-                  p.toFile.gulp.map(bytes => (b, t, bytes))
-                }
-              if (zos eq null) binaries.foreach{ x => x.? match { case (nm, t, b) =>
-                val p = target resolve nm
-                Files.write(p, b)
-                Files.setLastModifiedTime(p, t)
-              }}
-              else binaries.foreach{ x => x.? match { case (nm, t, b) =>
-                val ze = new ZipEntry(finalTarget.getFileName.toString + "/" + nm)
-                ze.setLastModifiedTime(t)
-                zos.putNextEntry(ze)
-                zos.write(b, 0, b.length)
-                zos.closeEntry()
-              }}
-            }
-            */
+      def txtcopy(name: String, modified: FileTime) = FromStore.Text[Unit]{ txt =>
+        if (zos eq null) {
+          val p = target resolve newName(name)
+          Files.write(p, txt.lines.asJava, UTF_8)
+          Files.setLastModifiedTime(p, modified)
+        }
+        else {
+          val e = new ZipEntry(whoName.dropRight(4) + "/" + newName(name))
+          e.setLastModifiedTime(modified)
+          zos.putNextEntry(e)
+          zos.write(txt.lines.mkString("\n").getBytes(UTF_8))
+          zos.closeEntry
+        }
+      }
+
+      c.visitAll(
+       if (!mod && c.summary.isDefined) new FilesVisitor {
+          override def requestBlobs = true
+          override def visitBlobData(name: String, modified: FileTime) = bincopy(name, modified)
+          override def requestSummary = true
+          override def visitSummary(name: String, modified: FileTime) = ct.summary() match {
+            case Some(xf) => xf andThen txtcopy(name, modified)
+            case _        => bincopy(name, modified)
+          }
+          override def requestImages = true
+          override def visitImage(name: String, modified: FileTime) = bincopy(name, modified)
+          override def requestOthers(category: String) = true
+          override def visitOther(category: String, name: String, modified: FileTime) = bincopy(name, modified)
+        }
+        else new FilesVisitor {
+          /*
+          val mai: Mu[Option[Array[Int]]] = Mu(None)
+          val times = c.times(saveTransitions = mai)
+          override def requestBlobs = true
+          */
+        }
+      )
     }
-    finally { 
-      if (zf ne null) zf.close
+    finally {
       if (zos ne null) zos.close
     }
 
-    null
+    if (atomically) Files.move(target, finalTarget, StandardCopyOption.ATOMIC_MOVE)
+
+    Contents.from[A](finalTarget, _ => Yes(base)).map(y => Some(y))
   }
 }

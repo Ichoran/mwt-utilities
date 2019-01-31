@@ -9,17 +9,39 @@ object Stored {
 
 sealed abstract class FromStore[+Z] {}
 object FromStore {
+  sealed trait Transformative {}
+
   trait Text[+Z] extends FromStore[Z] { 
     def apply(t: Stored.Text): Z
     final def apply(lines: Vector[String]): Z = apply(new Stored.Text(lines))
+    final def branch[Y](f: Z => Either[Stored.Text, Y], post: Text[Y]): Text[Y] = txt => f(apply(txt)) match {
+      case Left(t)  => post(t)
+      case Right(y) => y
+    }
   }
-  object Text{ def apply[Z](t: Text[Z]) = t }
+  object Text { 
+    def apply[Z](t: Text[Z]) = t
+    trait Transform extends Text[Stored.Text] {
+      final def andThen[Z](that: Text[Z]): Text[Z] = txt => that.apply(this.apply(txt))
+    }
+    object Transform { def apply(t: Transform) = t }
+  }
 
   trait Binary[+Z] extends FromStore[Z] {
     def apply(b: Stored.Binary): Z
     final def apply(data: Array[Byte]): Z = apply(new Stored.Binary(data))
+    final def branch[Y](f: Z => Either[Stored.Binary, Y], post: Binary[Y]): Binary[Y] = bin => f(apply(bin)) match {
+      case Left(b)  => post(b)
+      case Right(y) => y
+    }
   }
-  object Binary{ def apply[Z](b: Binary[Z]) = b }
+  object Binary{ 
+    def apply[Z](b: Binary[Z]) = b
+    trait Transform extends Binary[Stored.Binary] {
+      final def andThen[Z](that: Binary[Z]): Binary[Z] = bin => that.apply(this.apply(bin))
+    }
+    object Transform { def apply(t: Transform) = t }
+  }
 
   trait All[+Z] extends Text[Z] with Binary[Z] {
     def from(s: Stored): Z
