@@ -154,7 +154,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     else {
       if (fv.requestBlobs) {
         blobs.foreach{ blob =>
-          val p = who resolve blob.tap(println)
+          val p = who resolve blob
           fv.visitBlobData(blob, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -166,7 +166,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (fv.requestSummary) {
         summary match {
           case Some(s) =>
-            val p = who resolve s.tap(println)
+            val p = who resolve s
             fv.visitSummary(s, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -178,7 +178,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       if (fv.requestImages) {
         images.foreach{ image =>
-          val p = who resolve image.tap(println)
+          val p = who resolve image
           fv.visitImage(image, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -190,7 +190,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       others.foreach{ case (ext, fs) =>
         if (fv.requestOthers(ext) && fs.nonEmpty) {
           fs.foreach{ f =>
-            val p = who resolve f.tap(println)
+            val p = who resolve f
             fv.visitOther(ext, f, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -821,7 +821,7 @@ object Contents {
     val sBase = summary.map(x => extractBase(clipOffDir(x))).toList
     val bBases = blobs.map(x => extractBase(clipOffDir(x), blobRules = true)).toList
     val base = ((sBase ::: bBases).toSet.toList: List[String]) match {
-      case Nil => return No(s"No summary files or blob files in $p\n${(new Exception).explain()}")
+      case Nil => return No(s"No summary files or blob files in $p")
       case b :: Nil => b
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }
