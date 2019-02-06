@@ -4,11 +4,14 @@ import java.lang.{ StringBuilder => JStringBuilder }
 
 import kse.flow._
 import kse.maths._
+import kse.maths.stats._
 import kse.eio._
 
 
 /** This class holds .summary file data (one of the old MWT data output files) */
 class Summary extends TimedMonoidList[Summary.Entry] {
+  import Summary.{speedWindow, goodBlobN}
+
   protected def myDefaultSize = 256
   protected def emptyElement(t: Double) = Summary.Entry(t)
   protected def mutableMerge(existing: Summary.Entry, novel: Summary.Entry) { existing += novel }
@@ -16,12 +19,66 @@ class Summary extends TimedMonoidList[Summary.Entry] {
   def text(): Vector[String] = text((i, _) => (i+1).toString)
 
   override def toString = text((i, _) => if (i < 10) (i+1).toString else null).mkString("\n")
+
+  def imprint(blob: Blob): this.type = {
+    if (blob.length == 0) return this
+
+    val t0 = blob(0).t
+    var j = 0
+    val el = EstM()
+    val ew = EstM()
+    val ea = EstM()
+    while (j < blob.length) {
+      val eb = blob(j)
+      el += eb.len
+      ew += eb.wid
+      ea += eb.asp
+      j += 1
+    }
+
+    if (el.n == 0 || ew.n == 0 || ea.n == 0) return this
+
+    j = 0
+    var i = 0
+    val (sa, wa) = blob.speeds(speedWindow)
+    while (j < blob.length && i < length) {
+      val eb = blob(j)
+      i = (i max indexOf(eb.t)) min (length - 1)
+      val es = apply(i)
+      es imprint (eb, t0, el.mean, ew.mean, ea.mean, sa(j), wa(j), blob.length >= goodBlobN)
+      if (j == 0) es findIdentity blob.id
+      if (j == blob.length-1) es loseIdentity blob.id
+      j += 1
+    }
+
+    this
+  }
+
+  def adoptEvents(that: Summary): this.type = {
+    var i = 0
+    while (i < that.length) {
+      val e = that(i)
+      if (e.stimuli != 0L) {
+        val j = indexOf(e.t, 0)
+        val k = if ((apply(j).t - e.t).abs > 1.1e-3) indexOf(e.t, 1) else j
+        val myE = apply(k)
+        if (!((myE.t - e.t).abs < 1e-2 && (k == 0 || k == length-1))) {
+          myE.stimuli |= e.stimuli
+        }
+      }
+      i += 1
+    }
+    this
+  }
 }
 object Summary extends TimedListCompanion {
   import Approximation._
 
   type MyElement = Entry
   type MyTimed = Summary
+
+  final val speedWindow = 0.2
+  final val goodBlobN = 8
 
   class Entry private (val t: Double, val jtx: Double = 0.0, val jty: Double = 0.0, val jnx: Int = 0, val jny: Int = 0)
   extends TimedElement {
@@ -66,7 +123,7 @@ object Summary extends TimedListCompanion {
         pixels    = pix
       }
       else {
-        persist   = ((persist   * goodN) + per ) / (goodN + 1)
+        persist   = ((persist   * n    ) + per ) / (n     + 1)
         speed     = ((speed     * goodN) + sp  ) / (goodN + 1)
         angSpeed  = ((angSpeed  * goodN) + aSp ) / (goodN + 1)
         length    = ((length    * goodN) + len ) / (goodN + 1)
@@ -79,6 +136,25 @@ object Summary extends TimedListCompanion {
         pixels    = ((pixels    * goodN) + pix ) / (goodN + 1)
       }
       goodN += 1
+      this
+    }
+    def imprint(blob: Blob.Entry, t0: Double, avlen: Double, avwid: Double, avasp: Double, avspd: Double, avang: Double, good: Boolean): this.type = {
+      n += 1
+      persist = ((persist * n) + (blob.t - t0)) / (n + 1)
+      if (good) {
+        val scale = 1.0 / (goodN + 1)
+        speed     = ((speed     * goodN) + avspd)          * scale
+        angSpeed  = ((angSpeed  * goodN) + avang)          * scale
+        length    = ((length    * goodN) + blob.len)       * scale
+        relLength = ((relLength * goodN) + blob.len/avlen) * scale
+        width     = ((width     * goodN) + blob.wid)       * scale
+        relWidth  = ((relWidth  * goodN) + blob.wid/avwid) * scale
+        aspect    = ((aspect    * goodN) + blob.asp)       * scale
+        relAspect = ((relAspect * goodN) + blob.asp/avasp) * scale
+        wiggle    = ((wiggle    * goodN) + blob.wig)       * scale   // Blob returns 0 if no skeleton
+        pixels    = ((pixels    * goodN) + blob.area)      * scale
+        goodN += 1
+      }
       this
     }
     def +=(that: Entry): this.type = {
@@ -98,7 +174,7 @@ object Summary extends TimedListCompanion {
         }
         else {
           val good = (goodN + that.goodN).toDouble
-          persist   = (persist*goodN   + that.persist*that.goodN  ) / good
+          persist   = (persist*n       + that.persist*that.n      ) / (n + that.n).toDouble
           speed     = (speed*goodN     + that.speed*that.goodN    ) / good
           angSpeed  = (angSpeed*goodN  + that.angSpeed*that.goodN ) / good
           length    = (length*goodN    + that.length*that.goodN   ) / good

@@ -59,7 +59,7 @@ object FilesVisitor {
       { x => callback(category, name, x.data) }: FromStore.Binary[Unit]
   }
 
-  // TODO--move this to an actual toSet
+  // TODO--move this to an actual unit test
   object UnitTest {
     class ByteCounter extends mwt.utilities.FilesVisitor {
       var count: Long = 0L
@@ -80,7 +80,7 @@ object FilesVisitor {
         { x => count += x.data.length; () }: FromStore.Binary[Unit]
     }
 
-    // TODO--write a test!
+    // TODO--write more tests!
   }
 }
 
@@ -154,7 +154,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     else {
       if (fv.requestBlobs) {
         blobs.foreach{ blob =>
-          val p = who resolve blob
+          val p = who resolve blob.tap(println)
           fv.visitBlobData(blob, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -166,7 +166,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       if (fv.requestSummary) {
         summary match {
           case Some(s) =>
-            val p = who resolve s
+            val p = who resolve s.tap(println)
             fv.visitSummary(s, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -178,7 +178,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       }
       if (fv.requestImages) {
         images.foreach{ image =>
-          val p = who resolve image
+          val p = who resolve image.tap(println)
           fv.visitImage(image, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -190,7 +190,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
       others.foreach{ case (ext, fs) =>
         if (fv.requestOthers(ext) && fs.nonEmpty) {
           fs.foreach{ f =>
-            val p = who resolve f
+            val p = who resolve f.tap(println)
             fv.visitOther(ext, f, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
@@ -205,9 +205,24 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
   }.mapNo(e => s"Could not visit MWT output\n${e.explain(24)}")
 
   
-  def times(knownMax: Option[Double] = None, fromBlobs: Boolean = false, saveTransitions: Option[Mu[Option[Array[Int]]]] = None): Ok[String, Array[Double]] =
+  def times(
+    knownMax: Option[Double] = None,
+    fromBlobs: Boolean = false,
+    storeStimuli: Option[Mu[Option[Array[(Double, Long)]]]],
+    storeTransitions: Option[Mu[Option[Array[Int]]]] = None
+  ): Ok[String, Array[Double]] =
     if (summary.isDefined && !fromBlobs) theSummary.map{ s =>
-      saveTransitions.foreach{ mai =>
+      storeStimuli.foreach{ madl =>
+        val st = Array.newBuilder[(Double, Long)]
+        var i = 0
+        while (i < s.length) {
+          val e = s(i)
+          if (e.stimuli != 0L) st += ((e.t, e.stimuli))
+          i += 1
+        }
+        madl.value = Some(st.result)
+      }
+      storeTransitions.foreach{ mai =>
         val tr = Array.newBuilder[Int]
         var i = 0
         while (i < s.length) {
@@ -233,7 +248,8 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
     else {
       import Contents.TmFr
 
-      saveTransitions.foreach{ mai => mai.value = None }
+      storeTransitions.foreach{ mai => mai.value = None }
+      storeStimuli.foreach{ mai => mai.value = None }
 
       // Timepoints we've witnessed (map to reported frame number and count delta)
       val m = collection.mutable.HashMap.empty[Double, TmFr]
@@ -398,10 +414,10 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         finally { zf.close }
       }
       else {
-        blobs.foreach{ blob =>
-          if (blob endsWith ".blob") {
-            if (visitor.start(getIdFromBlobName(blob, seen).?)) {
-              Files.lines(who resolve blob).forEach(visitor accept _)
+        blobs.foreach{ blobf =>
+          if (blobf endsWith ".blob") {
+            if (visitor.start(getIdFromBlobName(blobf, seen).?)) {
+              Files.lines(who resolve blobf).forEach(visitor accept _)
               visitor.stop()
             }
           }
@@ -409,11 +425,11 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             var n = 0
             var id = 0
             var visit = false
-            Files.lines(who resolve blob).forEach{ line =>
+            Files.lines(who resolve blobf).forEach{ line =>
               n += 1
               if (line.length > 0 && line.charAt(0) == '%') {
                 if (visit) visitor.stop()
-                id = getIdFromBlobsLine(line, blob, n, seen).?
+                id = getIdFromBlobsLine(line, blobf, n, seen).?
                 visit = visitor.start(id)
               }
               else if (line.length > 0 && visit) visitor accept line
@@ -805,7 +821,7 @@ object Contents {
     val sBase = summary.map(x => extractBase(clipOffDir(x))).toList
     val bBases = blobs.map(x => extractBase(clipOffDir(x), blobRules = true)).toList
     val base = ((sBase ::: bBases).toSet.toList: List[String]) match {
-      case Nil => return No(s"No summary files or blob files in $p")
+      case Nil => return No(s"No summary files or blob files in $p\n${(new Exception).explain()}")
       case b :: Nil => b
       case clutter => return No(s"More than one data source in $p\nBase names found:\n  ${clutter.mkString("\n  ")}\n")
     }

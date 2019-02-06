@@ -10,6 +10,7 @@ import java.util.zip._
 import scala.collection.JavaConverters._
 
 import kse.flow._
+import kse.coll._
 import kse.eio._
 import kse.maths._
 
@@ -39,17 +40,16 @@ class ContentsTransformer[A] {
   def modifyBlobs(): Boolean = false
 
   /** This returns a handler for blob files.  Note that this will _only_ be called if `blobPolicy`
-    * is `Modify`. It passes back a handler that on the left branch creates a new block of blob text
-    * given the old one, or requests for the blob to be dropped (`Right(false)`) or copied unchanged
-    * (`Right(true)`).
+    * is `Modify`.  It either generates new text from the old one in a Some, or returns None if the
+    * blob is to be removed.  The blob number will be ignored; all blobs get renumbered.
     */
-  def blob(n: Int): FromStore.Text[Either[Stored.Text, Boolean]] = FromStore.Text(x => Right(true))
+  def blob(n: Int): Blob => Option[Blob] = b => Some(b)
 
   /** This is called when all blobs are done, but only if `modifyBlobs` is true.
     * The return is any new blobs that are to be created in addition to the old ones
     * (these blobs will get numbered automatically).
     */
-  def stopBlobs(): Iterator[Stored.Text] = Iterator.empty
+  def stopBlobs(): Iterator[Blob] = Iterator.empty
 
   /** This is called when there is a summary file to get a transformer from old to new summary file contents.
     * Note that the data passed in here will have been generated from blob data if the summary file needed to
@@ -66,7 +66,7 @@ class ContentsTransformer[A] {
   /** This is called after all existing image files have been seen.  The iterator can create new
     * image files.
     */
-  def stopImages(): Iterator[(String, Stored.Binary)] = Iterator.empty
+  def extraImages(): Iterator[(String, Stored.Binary)] = Iterator.empty
 
   /** This is called to handle each category of other kinds of file.  If `None` is given, then the files
     * are all skipped.  Otherwise, each filename is passed into the function to return an appropriate handler
@@ -78,15 +78,18 @@ class ContentsTransformer[A] {
     * to create, by "other" category number (i.e. file extension).  The returned Iterator is to
     * run through each file of that type.
     */
-  def stop(): Map[String, Iterator[(String, Stored)]] = Map.empty
+  def extraOther(): Map[String, Iterator[(String, Stored.Data)]] = Map.empty
 }
 object ContentsTransformer {
   /** Copies existing files without changes */
-  def default[A]: ContentsTransformer[A] = new ContentsTransformer[A] {}
+  class Default[A]() extends ContentsTransformer[A] {}
 
-  /** Cleans up existing files without losing much */
-  def clean[A](minMove: Double, minTime: Double, target: Path): ContentsTransformer[A] = new ContentsTransformer[A] {
-    private var newID = 0
+  /** Copies existing files without changes */
+  def default[A]: ContentsTransformer[A] = new Default[A]()
+
+
+  class Clean[A](val target: Path, val minMove: Double, val minTime: Double, val minFrames: Int = Summary.goodBlobN)
+  extends ContentsTransformer[A] {
     private def movedEnough(b: Blob): Boolean = {
       var eb = b(0)
       var minX = eb.cx
@@ -108,20 +111,17 @@ object ContentsTransformer {
     }
     override def relocate(here: Path) = target
     override def modifyBlobs() = true
-    override def blob(n: Int) = FromStore.Text{ txt =>
-      Blob.from(n, txt.lines, keepSkeleton = false) match {
-        case No(_) => Right(false)  // Silently drop problems (?!)
-        case Yes(b) =>
-          if (b.length == 0) Right(false)
-          else if (b(b.length-1).t - b.length < minTime) Right(false)
-          else if (!movedEnough(b)) Right(false)
-          else {
-            newID += 1
-            Left(Stored.Text((new Blob(newID)).loot(b).text()))
-          }
-      }
-    }
+    override def blob(n: Int) = blob => {
+      if (blob.length == 0 || blob.length < minFrames) None
+      else if (blob(blob.length-1).t - blob.length < minTime) None
+      else if (!movedEnough(blob)) None
+      else Some(blob)
+    }    
   }
+
+  /** Cleans up existing files without losing much */
+  def clean[A](target: Path, minMove: Double, minTime: Double, minFrames: Int = Summary.goodBlobN) =
+    new Clean[A](target, minMove, minTime, minFrames)
 }
 
 
@@ -207,11 +207,16 @@ object CopyTransform {
       }
 
       abstract class MyVisitor extends FilesVisitor {
+
         override def requestImages = true
         override def visitImage(name: String, modified: FileTime) = ct.image(name).
           branch(_.toOk.swap.toEither, bincopy(name, modified))
-        override def requestOthers(category: String) = true
+        override def noMoreImages() {
+          ct.extraImages().foreach{ case (name, bin) => bincopy(name, FileTime from Instant.now).apply(bin) }
+        }
+
         private[this] val myCategoryCache = collection.mutable.HashMap.empty[String, Option[String => FromStore[Option[Stored]]]]
+        override def requestOthers(category: String) = true
         override def visitOther(category: String, name: String, modified: FileTime) = {
           myCategoryCache.getOrElseUpdate(category, ct.other(category)) match {
             case Some(f) => f(name) match {
@@ -247,20 +252,106 @@ object CopyTransform {
           }
           bincopy(name, modified)
         }
+        override def stop() {
+          ct.extraOther().foreach{ case (category, others) =>
+            others.foreach{ case (name, data) => data match { 
+              case bin: Stored.Binary => bincopy(name, FileTime from Instant.now).apply(bin)
+              case txt: Stored.Text   => txtcopy(name, FileTime from Instant.now).apply(txt)
+            }}
+          }
+        }
       }
 
       
       if (!mod && c.summary.isDefined) c.visitAll(new MyVisitor {
         override def requestBlobs = true
         override def visitBlobData(name: String, modified: FileTime) = bincopy(name, modified)
+
         override def requestSummary = true
         override def visitSummary(name: String, modified: FileTime) = ct.summary() match {
           case Some(xf) => xf andThen txtcopy(name, modified)
           case _        => bincopy(name, modified)
         }
-      })
+      }).?
       else {
-        ???
+        val moai: Mu[Option[Array[Int]]] = Mu(None)  // TODO--can we use this?  Or should we drop it?
+        val moadl: Mu[Option[Array[(Double, Long)]]] = Mu(None)  // Any point using this or shall we just slurp it later?
+        val ts = c.times(storeStimuli = Some(moadl), storeTransitions = Some(moai)).yesOr(no => throw new IOException(no))
+        val sm = new Summary()
+        ts.foreach(t => sm add Summary.Entry(t))
+        val seen = collection.mutable.Set.empty[Int]
+        val mod = FileTime from Instant.now
+
+        var currentBlock = 0
+        var currentFill = 0
+        def currentBlobsName = f"${baseString}_${currentBlock}%05dk.blobs"
+        var currentText = Vector.newBuilder[String]
+        def writeBlobsAndAdvance() {
+          if (currentFill > 0) {
+            txtcopy(currentBlobsName, mod).apply(Stored.Text(currentText.result))
+            currentBlock += 1
+            currentFill = 0
+            currentText = Vector.newBuilder[String]
+          }
+        }
+        def writeOneBlob(b: Blob, sm: Summary) {
+          currentFill += 1
+          currentText += s"% ${currentBlock*1000 + currentFill}"
+          currentText ++= b.text(sm)
+          if (currentFill == 1000) writeBlobsAndAdvance()
+        }
+
+        def writeSummary() {
+          txtcopy(s"${baseString}.summary", mod).apply(Stored.Text(sm.text()))
+        }
+
+        c.visitAll(new MyVisitor {
+          override def requestBlobs = true
+          override def visitBlobData(name: String, modified: FileTime): FromStore.Text[Unit] = txt => {
+            println(s"Visiting $name at $modified")
+            if (name.endsWith("blob")) {
+              val id = c.getIdFromBlobName(name, seen).yesOr(no => throw new IOException(no))
+              val b = Blob.from(id, txt.lines, keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
+              sm imprint b
+              ct.blob(id).apply(b) match {
+                case Some(x) => writeOneBlob(x, sm)
+                case None => ()
+              }
+            }
+            else {
+              var i = 0
+              val seen = collection.mutable.HashSet.empty[Int]
+              while (i < txt.lines.length && !txt.lines(i).startsWith("%")) i += 1
+              while (i < txt.lines.length) {
+                val id = c.getIdFromBlobsLine(txt.lines(i), name, i+1, seen).yesOr(no => throw new IOException(no))
+                var j = i + 1
+                while (j < txt.lines.length && !txt.lines(j).startsWith("%")) j += 1
+                println(s"Parsing lines $i to $j")
+                val b = Blob.from(id, txt.lines.slice(i+1, j), keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
+                sm imprint b
+                ct.blob(id).apply(b) match {
+                  case Some(x) => writeOneBlob(x, sm)
+                  case None => ()
+                }
+                i = j
+              }
+            }
+          }
+          override def noMoreBlobs() {
+            ct.stopBlobs().foreach{ blob => writeOneBlob(blob, sm) }
+            writeBlobsAndAdvance()
+          }
+
+          override def requestSummary = true
+          override def visitSummary(name: String, modified: FileTime): FromStore.Text[Unit] = txt => {
+            val orig = Summary.from(txt.lines).yesOr(no => throw new IOException(no))
+            sm adoptEvents orig
+            writeSummary()
+          }
+          override def noSummary() {
+            writeSummary()
+          }
+        }).?
       }
     }
     finally {

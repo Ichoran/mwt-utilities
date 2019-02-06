@@ -10,7 +10,82 @@ import kse.eio._
 class Blob(val id: Int) extends TimedList[Blob.Entry] {
   protected def myDefaultSize = 16
 
-  def text(that: TimedList[_]): Vector[String] = text((_, e) => (that.indexOf(e.t) + 1).toString)
+  def speeds(window: Double): (Array[Float], Array[Float]) = {
+    val sa = new Array[Float](length)
+    val wa = new Array[Float](length)
+    if (length < 2) return (sa, wa)
+    var i0 = 0
+    var i = 0
+    var i1 = 0
+    var t0 = apply(i).t
+    var t  = t0
+    var t1 = t0
+
+    // Slide along to find appropriate endpoints for time interval
+    while (i < length) {
+      t = apply(i).t
+      while (t - t0 < 0.49*window && i0 > 0) { i0 -= 1; t0 = apply(i0).t }
+      while (t1 - t < 0.49*window && i1+1 < length) { i1 += 1; t1 = apply(i1).t }
+      var shrinkable = (t1 - t0) > window && (i0+1 < i || i+1 < i1)
+      while (shrinkable) {
+        val t0a = if (i0+1 < i) apply(i0+1).t else t0
+        val t1a = if (i < i1-1) apply(i1-1).t else t1
+        if (t1a - t <= 0.95*window || i+1 >= i1) {
+          if (t - t0a <= 0.95*window || i0+1 >= i) shrinkable = false
+          else {
+            t0 = t0a
+            i0 += 1
+          }
+        }
+        else if (t - t0a <= 0.95*window || i0+1 >= i) {
+          if (t1a - t <= 0.95*window || i+1 >= i1) shrinkable = false
+          else {
+            t1 = t1a
+            i1 -= 1
+          }
+        }
+        else {
+          if (t1 - t > t - t0) {
+            t1 = t1a
+            i1 -= 1
+          }
+          else {
+            t0 = t0a
+            i0 += 1
+          }
+        }
+      }
+
+      // Measure speeds with this time interval (rough estimate)
+      val idt = 1.0/(t1-t0 max 0.5*window)
+
+      // Speed calculation (with ad-hoc partial compensation for reversal)
+      val v0 = Vc.from(apply(i0).cx, apply(i0).cy)
+      val v  = Vc.from(apply(i).cx,  apply(i).cy)
+      val v1 = Vc.from(apply(i1).cx, apply(i1).cy)
+      val d2  = v1 distSq v0
+      val d2a = v  distSq v0
+      val d2b = v1 distSq v
+      sa(i) = ((if (2*d2 >= d2a + d2b) d2 else 0.5*(d2a+d2b)).sqrt * idt).toFloat
+
+      // Angular velocity calculation (with ad-hoc partial compensation for reverse-swing)
+      val a0 = Vc.from(apply(i0).bx, apply(i0).by)
+      val a  = Vc.from(apply(i).bx,  apply(i).by)
+      val a1 = Vc.from(apply(i1).bx, apply(i1).by)
+      val dot  = (a1 * a0).abs
+      val dota = (a  * a0).abs
+      val dotb = (a1 * a ).abs
+      wa(i) = ((if (2*(1 - dot) >= 2 - dota - dotb) dot else 0.5*(dota+dotb)).clip(0, 1).acos * idt).toFloat
+
+      i += 1
+    }
+    (sa, wa)
+  }
+
+  def text(that: TimedList[_]): Vector[String] = {
+    var last = 0
+    text((_, e) => { last = (last + 1) max (that.indexOf(e.t) + 1); last.toString })
+  }
 
   def text(): Vector[String] = text((_, e) => e.frame.toString)
 
@@ -30,6 +105,38 @@ object Blob extends TimedListCompanion {
     val nSkel: Short, val nOut: Short, val ox: Short, val oy: Short, val data: Array[Int]
   )
   extends TimedElement {
+    private[this] var myWiggle = Float.NaN
+
+    def asp = if (len > 0) wid/len else 0
+
+    def wig = {
+      if (myWiggle.isNaN) {
+        myWiggle =
+          if (nSkel == 0) 0.0f
+          else {
+            val na = 1+nSkel/5
+            val nb = nSkel - na - 1
+            if (na >= nb) 0.0f
+            else {
+              val c0 = data(0      ).asShorts
+              val ca = data(na     ).asShorts
+              val cz = data(na+1   ).asShorts
+              val cy = data(nb-1   ).asShorts
+              val cb = data(nb     ).asShorts
+              val c1 = data(nSkel-1).asShorts
+              val vha = Vc(c0.s0 - ca.s0, c0.s1 - ca.s1)
+              val vta = Vc(cz.s0 - c1.s0, cz.s1 - c1.s1)
+              val dota = vha dotHat vta
+              val vhb = Vc(c1.s0 - cb.s0, c1.s1 - cb.s1)
+              val vtb = Vc(cy.s0 - c0.s0, cy.s1 - c0.s1)
+              val dotb = vhb dotHat vtb
+              (dota min dotb).clip(0, 1).acos.toFloat
+            }
+          }
+      }
+      myWiggle
+    }
+
     override def equals(that: Any): Boolean = that match {
       case e: Entry =>
         c4(t, e.t) && c4(cx, e.cx) && c4(cy, e.cy) && area == e.area &&
