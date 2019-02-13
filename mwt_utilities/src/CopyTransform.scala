@@ -108,14 +108,13 @@ object ContentsTransformer {
         i += 1
       }
       val ans = ((maxX - minX).sq + (maxY - minY).sq)/(if (maxL < 1) 1 else maxL).sq >= minMove.sq
-      if (!ans) println(f"Too still: $maxL%.2f vs ${((maxX - minX).sq + (maxY - minY).sq).sqrt}%.2f compared to $minMove")
       ans
     }
     override def relocate(here: Path) = target
     override def modifyBlobs() = true
     override def blob(n: Int) = blob => {
-      if (blob.length == 0 || blob.length < minFrames) { println(s"Too few: ${blob.length}"); None }
-      else if (blob(blob.length-1).t - blob(0).t < minTime) { println(f"Too short: ${blob(0).t}%.3f - ${blob(blob.length-1).t}%.3f"); None }
+      if (blob.length == 0 || blob.length < minFrames) None
+      else if (blob(blob.length-1).t - blob(0).t < minTime) None
       else if (!movedEnough(blob)) None
       else Some(blob)
     }    
@@ -304,7 +303,6 @@ object CopyTransform {
         var currentText = Vector.newBuilder[String]
         def writeBlobsAndAdvance() {
           if (currentFill > 0) {
-            println(s"Writing $currentBlobsName")
             txtcopy(currentBlobsName, mod).apply(Stored.Text(currentText.result))
             currentBlock += 1
             currentFill = 0
@@ -323,18 +321,21 @@ object CopyTransform {
         }
 
         c.visitAll(new MyVisitor {
+          private def handleOneBlob(source: Vector[String], id: Int) {
+            val b = Blob.from(id, source, keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
+            ct.blob(id).apply(b) match {
+              case Some(x) =>
+                sm imprint x
+                writeOneBlob(x, sm)
+              case None => ()
+            }
+          }
+
           override def requestBlobs = true
           override def visitBlobData(name: String, modified: FileTime): FromStore.Text[Unit] = txt => {
             if (name.endsWith("blob")) {
               val id = c.getIdFromBlobName(name, seen).yesOr(no => throw new IOException(no))
-              val b = Blob.from(id, txt.lines, keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
-              ct.blob(id).apply(b) match {
-                case Some(x) => 
-                  println(s"Accepted blob $id")
-                  sm imprint b
-                  writeOneBlob(x, sm)
-                case None => println(s"  Rejected blob $id"); ()
-              }
+              handleOneBlob(txt.lines, id)
             }
             else {
               var i = 0
@@ -344,21 +345,13 @@ object CopyTransform {
                 val id = c.getIdFromBlobsLine(txt.lines(i), name, i+1, seen).yesOr(no => throw new IOException(no))
                 var j = i + 1
                 while (j < txt.lines.length && !txt.lines(j).startsWith("%")) j += 1
-                val b = Blob.from(id, txt.lines.slice(i+1, j), keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
-                ct.blob(id).apply(b) match {
-                  case Some(x) =>
-                    println(s"Accepted blob $id")
-                    sm imprint x 
-                    writeOneBlob(x, sm)
-                  case None => println(s"  Rejected blob $id"); ()
-                }
+                handleOneBlob(txt.lines.slice(i+1, j), id)
                 i = j
               }
             }
           }
           override def noMoreBlobs() {
             someDataToWrite = currentBlock > 0 || currentFill > 0
-            println("Done with blobs");
             ct.stopBlobs().foreach{ blob => writeOneBlob(blob, sm) }
             writeBlobsAndAdvance()
           }
