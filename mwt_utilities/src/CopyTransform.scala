@@ -17,7 +17,10 @@ import kse.maths._
 
 /** This class is a visitor for MWT data that is used when copying-and-transforming directories.
   */
-class ContentsTransformer[A] {
+abstract class ContentTransformer[A] {
+  /** An optional identifying title for the transform (used in error messages) */
+  def title: String = ""
+
   /** This is called first; if it returns false, the copy/transform is not performed. */
   def start(everything: Contents[A]): Boolean = true
 
@@ -80,16 +83,16 @@ class ContentsTransformer[A] {
     */
   def extraOther(): Map[String, Iterator[(String, Stored.Data)]] = Map.empty
 }
-object ContentsTransformer {
+object ContentTransformer {
   /** Copies existing files without changes */
-  class Default[A]() extends ContentsTransformer[A] {}
+  class Default[A]() extends ContentTransformer[A] {}
 
   /** Copies existing files without changes */
-  def default[A]: ContentsTransformer[A] = new Default[A]()
+  def default[A]: ContentTransformer[A] = new Default[A]()
 
 
   class Clean[A](val target: Path, val minMove: Double, val minTime: Double, val minFrames: Int = Summary.goodBlobN)
-  extends ContentsTransformer[A] {
+  extends ContentTransformer[A] {
     private def movedEnough(b: Blob): Boolean = {
       var eb = b(0)
       var minX = eb.cx
@@ -133,78 +136,103 @@ object CopyTransform {
     path.getFileSystem.getPath("")
   }
 
-  /** Returns Yes(None) if the file isn't supposed to be copied (e.g. because it's empty); Yes(Contents)
-    * if the copying went properly; and `No(msg)` if something went wrong.
-    */
-  def apply[A](
-    c: Contents[A],
-    ct: ContentsTransformer[A] = ContentsTransformer.default[A],
-    atomically: Boolean = true
-  ): Ok[String, Option[Contents[A]]] =
-  {
-    if (!ct.start(c)) return Yes(None)
+  def multiplex[A: scala.reflect.ClassTag](
+    c: Contents[A], atomically: Boolean = true
+  )(
+    transforms: ContentTransformer[A]*
+  ): Ok[String, Array[Option[Contents[A]]]] = {
+    val results = new Array[Option[Contents[A]]](transforms.length)
 
-    val prefix = ct.reprefix(c.target.prefix)
-    val (baseString, base) = ct.rebase(c.baseString, c.base)
-    val path = ct.relocate(c.who |> safeParent)
+    val (cts, oldixs) = transforms.toArray.zipWithIndex.filter{ case (ct, n) => 
+      val y = ct.start(c)
+      if (!y) results(n) = None
+      y
+    }.unzip
 
-    val zip = ct.toZip()
-    val whoName = c.who.getFileName.toString pipe { name =>
+    val ctsi = cts.zipWithIndex
+
+    if (results.forall(_ ne null)) return Yes(results)
+
+    val prefixes = cts.map(ct => ct.reprefix(c.target.prefix))
+    val (baseStrings, bases) = cts.map(ct => ct.rebase(c.baseString, c.base)).unzip
+    val paths = cts.map(ct => ct.relocate(c.who |> safeParent))
+
+    val zips = cts.map(ct => ct.toZip())
+    val whoNames = c.who.getFileName.toString pipe { name =>
       val bits = name.split('_')
       val stamp = (if (bits.length <= 2) name else bits.takeRight(2).mkString("_"))
-      val ans = prefix match {
-        case None    => stamp
-        case Some(p) => p + "_" + stamp
+      ctsi.map{ case (ct, ix) =>
+        val ans = prefixes(ix) match {
+          case None    => stamp
+          case Some(p) => p + "_" + stamp
+        }
+        val zip = zips(ix)
+        if (zip == c.target.isZip) ans
+        else if (zip)              ans + ".zip"
+        else                       ans.dropRight(4)
       }
-      if (zip == c.target.isZip) ans
-      else if (zip)              ans + ".zip"
-      else                       ans.dropRight(4)
     }
-    var tempName = (if (atomically) whoName + ".atomic" else whoName)
+    var tempNames = (if (atomically) whoNames.map(_ + ".atomic") else whoNames)
 
-    val target = path resolve tempName
-    var finalTarget = path resolve whoName
+    val targets = (paths zip tempNames).map{ case (path, tempName) => path resolve tempName }
+    var finalTargets = (paths zip whoNames).map{ case (path, whoName) => path resolve whoName }
 
-    if (Files exists finalTarget) return No(s"Could not store ${c.who} because target exists:\n$finalTarget")
-    if (atomically && Files.exists(target)) return No(s"Could not store ${c.who} because temporary location exists:\n$target")
+    finalTargets.foreach{ finalTarget =>
+      if (Files exists finalTarget)
+        return No(s"Could not store ${c.who} because target exists:\n$finalTarget")
+    }
+    targets.foreach{ target =>
+      if (atomically && Files.exists(target))
+        return No(s"Could not store ${c.who} because temporary location exists:\n$target")
+    }
 
-    val mod = ct.modifyBlobs
+    val mods = cts.map(ct => ct.modifyBlobs)
 
-    val zos: ZipOutputStream = safe {
-      if (zip) (new ZipOutputStream(new FileOutputStream(target.toFile))).tap(_.setLevel(7))
-      else (Files createDirectories target) pipe (_ => null)
-    } TossAs (s"Could not write $target\n" + _.explain())
+    val zosses: Array[ZipOutputStream] = ctsi.map{ case (_, ix) =>
+      val target = targets(ix)
+      safe {
+        if (zips(ix)) (new ZipOutputStream(new FileOutputStream(target.toFile))).tap(_.setLevel(7))
+        else (Files createDirectories target) pipe (_ => null)
+      } TossAs (s"Could not write $target\n" + _.explain())
+    }
 
-    var someDataToWrite = true
+    val someDataToWrite = Array.fill(cts.length)(true)
+    val titles = cts.map(ct => ct.title)
 
     try {
-      def newName(name: String) = {
-        val i = name.lastIndexOf(c.baseString)
-        if (i < 0) throw new IllegalArgumentException(s"Could not find ${c.baseString} in filename $name")
-        baseString + name.substring(i + c.baseString.length)
+      def titled(index: Int) = {
+        if (index < 0 || index >= titles.length || titles(index).isEmpty) ""
+        else s"While attempting copy ${titles(index)}:\n"
       }
-      def bincopy(name: String, modified: FileTime) = FromStore.Binary[Unit]{ b =>
+      def newName(index: Int, name: String) = {
+        val i = name.lastIndexOf(c.baseString)
+        if (i < 0) throw new IllegalArgumentException(s"${titled(index)}Could not find ${c.baseString} in filename $name")
+        baseStrings(index) + name.substring(i + c.baseString.length)
+      }
+      def bincopy(index: Int, name: String, modified: FileTime) = FromStore.Binary[Unit]{ b =>
+        val zos = zosses(index)
         if (zos eq null) {
-          val p = target resolve newName(name)
+          val p = targets(index) resolve newName(index, name)
           Files.write(p, b.data)
           Files.setLastModifiedTime(p, modified)
         }
         else {
-          val e = new ZipEntry(whoName.dropRight(4) + "/" + newName(name))
+          val e = new ZipEntry(whoNames(index).dropRight(4) + "/" + newName(index, name))
           e.setLastModifiedTime(modified)
           zos.putNextEntry(e)
           zos.write(b.data)
           zos.closeEntry
         }
       }
-      def txtcopy(name: String, modified: FileTime) = FromStore.Text[Unit]{ txt =>
+      def txtcopy(index: Int, name: String, modified: FileTime) = FromStore.Text[Unit]{ txt =>
+        val zos = zosses(index)
         if (zos eq null) {
-          val p = target resolve newName(name)
+          val p = targets(index) resolve newName(index, name)
           Files.write(p, txt.lines.asJava, UTF_8)
           Files.setLastModifiedTime(p, modified)
         }
         else {
-          val e = new ZipEntry(whoName.dropRight(4) + "/" + newName(name))
+          val e = new ZipEntry(whoNames(index).dropRight(4) + "/" + newName(index, name))
           e.setLastModifiedTime(modified)
           zos.putNextEntry(e)
           zos.write(txt.lines.mkString("\n").getBytes(UTF_8))
@@ -214,119 +242,144 @@ object CopyTransform {
 
       ///// Start of MyVisitor
       abstract class MyVisitor extends FilesVisitor {
-        override def requestImages = someDataToWrite
-        override def visitImage(name: String, modified: FileTime) = ct.image(name).
-          branch(_.toOk.swap.toEither, bincopy(name, modified))
+        override def requestImages = someDataToWrite.exists(_ == true)
+        override def visitImage(name: String, modified: FileTime) = FromStore.broadcast(
+          ctsi.collect{ case (ct, ix) if someDataToWrite(ix) =>
+            ct.image(name).branch(_.toOk.swap.toEither, bincopy(ix, name, modified))
+          }
+        )
         override def noMoreImages() {
-          ct.extraImages().foreach{ case (name, bin) => bincopy(name, FileTime from Instant.now).apply(bin) }
+          for ((ct, ix) <- ctsi if someDataToWrite(ix)) {
+            ct.extraImages().foreach{ case (name, bin) => bincopy(ix, name, FileTime from Instant.now).apply(bin) }            
+          }
         }
 
-        private[this] val myCategoryCache = collection.mutable.HashMap.empty[String, Option[String => FromStore[Option[Stored]]]]
-        override def requestOthers(category: String) = someDataToWrite
-        override def visitOther(category: String, name: String, modified: FileTime) = {
-          myCategoryCache.getOrElseUpdate(category, ct.other(category)) match {
-            case Some(f) => f(name) match {
-              case fb: FromStore.Binary[Option[Stored]] => fb.branch(
-                os => os match {
-                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
-                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
-                  case _                      => Right(())
-                },
-                bincopy(name, modified),
-                txtcopy(name, modified)
-              )
-              case ft: FromStore.Text[Option[Stored]]   => ft.branch(
-                os => os  match {
-                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
-                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
-                  case _                      => Right(())
-                },
-                txtcopy(name, modified),
-                bincopy(name, modified)
-              )
-              case fe: FromStore.Empty[Option[Stored]]  => fe.asIfData(
-                os => os  match {
-                  case Some(t: Stored.Text)   => Left(t: Stored.Data)
-                  case Some(b: Stored.Binary) => Left(b: Stored.Data)
-                  case _                      => Right(())
-                },
-                txtcopy(name, modified),
-                bincopy(name, modified)
-              )
+        private[this] val myCategoryCaches = 
+          Array.fill(cts.length)(collection.mutable.HashMap.empty[String, Option[String => FromStore[Option[Stored]]]])
+        override def requestOthers(category: String) = someDataToWrite.exists(_ == true)
+        override def visitOther(category: String, name: String, modified: FileTime) = FromStore.broadcast{ 
+          ctsi.collect{ case (ct, ix) if someDataToWrite(ix) =>
+            val myCategoryCache = myCategoryCaches(ix)
+            myCategoryCache.getOrElseUpdate(category, ct.other(category)) match {
+              case Some(f) => f(name) match {
+                case fb: FromStore.Binary[Option[Stored]] => fb.branch(
+                  os => os match {
+                    case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                    case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                    case _                      => Right(())
+                  },
+                  bincopy(ix, name, modified),
+                  txtcopy(ix, name, modified)
+                )
+                case ft: FromStore.Text[Option[Stored]]   => ft.branch(
+                  os => os  match {
+                    case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                    case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                    case _                      => Right(())
+                  },
+                  bincopy(ix, name, modified),
+                  txtcopy(ix, name, modified)
+                )
+                case fd: FromStore.Duo[Option[Stored]]    => fd.branch(
+                  os => os  match {
+                    case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                    case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                    case _                      => Right(())
+                  },
+                  bincopy(ix, name, modified),
+                  txtcopy(ix, name, modified)
+                )
+                case fe: FromStore.Empty[Option[Stored]]  => fe.asIfData(
+                  os => os  match {
+                    case Some(t: Stored.Text)   => Left(t: Stored.Data)
+                    case Some(b: Stored.Binary) => Left(b: Stored.Data)
+                    case _                      => Right(())
+                  },
+                  bincopy(ix, name, modified),
+                  txtcopy(ix, name, modified)
+                )
+              }
+              case _       => FromStore.Empty(_ => ())
             }
-            case _       => FromStore.Empty(_ => ())
+            bincopy(ix, name, modified)
           }
-          bincopy(name, modified)
         }
         override def stop() {
-          ct.extraOther().foreach{ case (category, others) =>
-            others.foreach{ case (name, data) => data match { 
-              case bin: Stored.Binary => bincopy(name, FileTime from Instant.now).apply(bin)
-              case txt: Stored.Text   => txtcopy(name, FileTime from Instant.now).apply(txt)
-            }}
+          ctsi.foreach{ case (ct, ix) =>
+            ct.extraOther().foreach{ case (category, others) =>
+              others.foreach{ case (name, data) => data match { 
+                case bin: Stored.Binary => bincopy(ix, name, FileTime from Instant.now).apply(bin)
+                case txt: Stored.Text   => txtcopy(ix, name, FileTime from Instant.now).apply(txt)
+              }}
+            }
           }
         }
       }
       ///// End of MyVisitor
 
       
-      if (!mod && c.summary.isDefined) c.visitAll(new MyVisitor {
-        private[this] var foundBlobs = false
+      if (mods.forall(_ == false) && c.summary.isDefined) c.visitAll(new MyVisitor {
+        private[this] var foundBlobs = Array.fill(cts.length)(false)
 
         override def requestBlobs = true
-        override def visitBlobData(name: String, modified: FileTime) = {
-          foundBlobs = true
-          bincopy(name, modified)
+        override def visitBlobData(name: String, modified: FileTime) =  FromStore.broadcastBinary{
+          ctsi.map{ case (ct, ix) =>
+            foundBlobs(ix) = true
+            bincopy(ix, name, modified)
+          }
         }
         override def noMoreBlobs() {
-          someDataToWrite = foundBlobs
+          for (i <- someDataToWrite.indices) someDataToWrite(i) = foundBlobs(i)
         }
 
-        override def requestSummary = someDataToWrite
-        override def visitSummary(name: String, modified: FileTime) = ct.summary() match {
-          case Some(xf) => xf andThen txtcopy(name, modified)
-          case _        => bincopy(name, modified)
-        }
+        override def requestSummary = someDataToWrite.exists(_ == true)
+        override def visitSummary(name: String, modified: FileTime) = FromStore.broadcast{ ctsi.map{ case (ct, ix) =>
+          ct.summary() match {
+            case Some(xf) => xf andThen txtcopy(ix, name, modified)
+            case _        => bincopy(ix, name, modified)
+          }
+        }}
       }).?
       else {
         val moai: Mu[Option[Array[Int]]] = Mu(None)  // TODO--can we use this?  Or should we drop it?
-        val moadl: Mu[Option[Array[(Double, Long)]]] = Mu(None)  // Any point using this or shall we just slurp it later?
+        val moadl: Mu[Option[Array[(Double, Long)]]] = Mu(None)  // Any point using this?
         val ts = c.times(storeStimuli = Some(moadl), storeTransitions = Some(moai)).yesOr(no => throw new IOException(no))
-        val sm = new Summary()
-        ts.foreach(t => sm add Summary.Entry(t))
-        val seen = collection.mutable.Set.empty[Int]
+        val sms = Array.fill(cts.length)(new Summary())
+        sms.foreach{ sm =>
+          ts.foreach(t => sm add Summary.Entry(t))
+        }
+        val seens = Array.fill(cts.length)(collection.mutable.Set.empty[Int])
         val mod = FileTime from Instant.now
 
-        var currentBlock = 0
-        var currentFill = 0
-        def currentBlobsName = f"${c.baseString}_${currentBlock}%05dk.blobs"
-        var currentText = Vector.newBuilder[String]
-        def writeBlobsAndAdvance() {
-          if (currentFill > 0) {
-            txtcopy(currentBlobsName, mod).apply(Stored.Text(currentText.result))
-            currentBlock += 1
-            currentFill = 0
-            currentText = Vector.newBuilder[String]
+        val currentBlocks = Array.fill(cts.length)(0)
+        var currentFills = Array.fill(cts.length)(0)
+        def currentBlobsName(index: Int) = f"${c.baseString}_${currentBlocks(index)}%05dk.blobs"
+        val currentTexts = Array.fill(cts.length)(Vector.newBuilder[String])
+        def writeBlobsAndAdvance(index: Int) {
+          if (currentFills(index) > 0) {
+            txtcopy(index, currentBlobsName(index), mod).apply(Stored.Text(currentTexts(index).result))
+            currentBlocks(index) += 1
+            currentFills(index) = 0
+            currentTexts(index) = Vector.newBuilder[String]
           }
         }
-        def writeOneBlob(b: Blob, sm: Summary) {
-          currentFill += 1
-          currentText += s"% ${currentBlock*1000 + currentFill}"
-          currentText ++= b.text(sm)
-          if (currentFill == 1000) writeBlobsAndAdvance()
+        def writeOneBlob(index: Int, b: Blob, sm: Summary) {
+          currentFills(index) += 1
+          currentTexts(index) += s"% ${currentBlocks(index)*1000 + currentFills(index)}"
+          currentTexts(index) ++= b.text(sm)
+          if (currentFills(index) == 1000) writeBlobsAndAdvance(index)
         }
 
-        def writeSummary() {
-          txtcopy(s"${c.baseString}.summary", mod).apply(Stored.Text(sm.text()))
+        def writeSummary(index: Int) {
+          txtcopy(index, s"${c.baseString}.summary", mod).apply(Stored.Text(sms(index).text()))
         }
 
         c.visitAll(new MyVisitor {
-          private def handleOneBlob(source: Vector[String], id: Int) {
-            val b = Blob.from(id, source, keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
-            ct.blob(id).apply(b) match {
+          private def handleOneBlob(index: Int, b: Blob, id: Int) {
+            cts(index).blob(id).apply(b) match {
               case Some(x) =>
-                sm imprint x
-                writeOneBlob(x, sm)
+                sms(index) imprint x
+                writeOneBlob(index, x, sms(index))
               case None => ()
             }
           }
@@ -334,49 +387,79 @@ object CopyTransform {
           override def requestBlobs = true
           override def visitBlobData(name: String, modified: FileTime): FromStore.Text[Unit] = txt => {
             if (name.endsWith("blob")) {
-              val id = c.getIdFromBlobName(name, seen).yesOr(no => throw new IOException(no))
-              handleOneBlob(txt.lines, id)
+              ctsi.foreach{ case (ct, ix) =>
+                val id = c.getIdFromBlobName(name, seens(ix)).yesOr(no => throw new IOException(no))
+                val b = Blob.from(id, txt.lines, keepSkeleton = false, keepOutline = true).yesOr(no => throw new IOException(no))
+                handleOneBlob(ix, b, id)
+              }
             }
             else {
               var i = 0
-              val seen = collection.mutable.HashSet.empty[Int]
               while (i < txt.lines.length && !txt.lines(i).startsWith("%")) i += 1
               while (i < txt.lines.length) {
-                val id = c.getIdFromBlobsLine(txt.lines(i), name, i+1, seen).yesOr(no => throw new IOException(no))
+                val ids = ctsi.map{ case (ct, ix) => 
+                  c.getIdFromBlobsLine(txt.lines(i), name, i+1, seens(ix)).yesOr(no => throw new IOException(no))
+                }
                 var j = i + 1
                 while (j < txt.lines.length && !txt.lines(j).startsWith("%")) j += 1
-                handleOneBlob(txt.lines.slice(i+1, j), id)
+                val b = Blob.
+                  from(0, txt.lines.slice(i+1, j), keepSkeleton = false, keepOutline = true).
+                  yesOr(no => throw new IOException(no))
+                ctsi.foreach{ case (ct, ix) => handleOneBlob(ix, b, ids(ix)) }
                 i = j
               }
             }
           }
           override def noMoreBlobs() {
-            someDataToWrite = currentBlock > 0 || currentFill > 0
-            ct.stopBlobs().foreach{ blob => writeOneBlob(blob, sm) }
-            writeBlobsAndAdvance()
+            ctsi.foreach{ case (ct, ix) =>
+              someDataToWrite(ix) = currentBlocks(ix) > 0 || currentFills(ix) > 0
+              ct.stopBlobs().foreach{ blob => writeOneBlob(ix, blob, sms(ix)) }
+              writeBlobsAndAdvance(ix)
+            }
           }
 
-          override def requestSummary = someDataToWrite
+          override def requestSummary = someDataToWrite.exists(_ == true)
           override def visitSummary(name: String, modified: FileTime): FromStore.Text[Unit] = txt => {
             val orig = Summary.from(txt.lines).yesOr(no => throw new IOException(no))
-            sm adoptEvents orig
-            writeSummary()
+            ctsi.foreach{ case (ct, ix) =>
+              sms(ix) adoptEvents orig
+              writeSummary(ix)
+            }
           }
           override def noSummary() {
-            writeSummary()
+            ctsi.foreach{ case (ct, ix) => writeSummary(ix) }
           }
         }).?
       }
     }
     finally {
-      if (zos ne null) zos.close
+      var i = 0
+      while (i < zosses.length) {
+        val zos = zosses(i)
+        if (zos ne null) zos.close
+        i += 1
+      }
     }
 
-    if (!someDataToWrite) { safe{ Files.delete(target) }.map(_ => None).mapNo(e => s"Could not delete empty $target\n${e.explain()}") }
-    else {
-      if (atomically) Files.move(target, finalTarget, StandardCopyOption.ATOMIC_MOVE)
+    ctsi.foreach{ case (ct, ix) =>
+      results(ix) =
+        if (!someDataToWrite(ix))
+          safe{ Files delete targets(ix) }.mapNo(e => s"Could not delete empty ${targets(ix)}\n${e.explain()}").map(_ => None).?
+        else {
+          if (atomically) Files.move(targets(ix), finalTargets(ix), StandardCopyOption.ATOMIC_MOVE)
+          Contents.from[A](finalTargets(ix), _ => Yes(bases(ix))).map(y => Some(y)).?
+        }
+    }
+    Yes(results)
+  }
 
-      Contents.from[A](finalTarget, _ => Yes(base)).map(y => Some(y))
-  }
-  }
+  /** Returns Yes(None) if the file isn't supposed to be copied (e.g. because it's empty); Yes(Contents)
+    * if the copying went properly; and `No(msg)` if something went wrong.
+    */
+  def apply[A: scala.reflect.ClassTag](
+    c: Contents[A],
+    ct: ContentTransformer[A] = ContentTransformer.default[A],
+    atomically: Boolean = true
+  ): Ok[String, Option[Contents[A]]] =
+    multiplex(c, atomically)(ct).map(_.head)
 }

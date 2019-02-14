@@ -112,6 +112,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitBlobData(bze.getName, bze.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(bze).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(bze).slurp.?)
+              case d: FromStore.Duo[_]    => zf.getInputStream(bze).gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
               case e: FromStore.Empty[_]  => e()
             }
           }
@@ -122,6 +123,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             case Some(ze) => fv.visitSummary(ze.getName, ze.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+              case d: FromStore.Duo[_]    => zf.getInputStream(ze).gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
               case e: FromStore.Empty[_]  => e()
             }
             case None     => fv.noSummary()
@@ -132,6 +134,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitBlobData(ize.getName, ize.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(ize).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(ize).slurp.?)
+              case d: FromStore.Duo[_]    => zf.getInputStream(ize).gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
               case e: FromStore.Empty[_]  => e()
             }
           }
@@ -142,6 +145,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
               fv.visitOther(ext, ze.getName, ze.getLastModifiedTime) match {
                 case b: FromStore.Binary[_] => b(zf.getInputStream(ze).gulp.?)
                 case t: FromStore.Text[_]   => t(zf.getInputStream(ze).slurp.?)
+                case d: FromStore.Duo[_]    => zf.getInputStream(ze).gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
                 case e: FromStore.Empty[_]  => e()
               }
             }
@@ -158,6 +162,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           fv.visitBlobData(blob, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            case d: FromStore.Duo[_]    => p.toFile.gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
             case e: FromStore.Empty[_]  => e()
           }
         }
@@ -170,6 +175,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitSummary(s, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+              case d: FromStore.Duo[_]    => p.toFile.gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
               case e: FromStore.Empty[_]  => e()
             }
           case None =>
@@ -182,6 +188,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
           fv.visitImage(image, Files.getLastModifiedTime(p)) match {
             case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
             case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+            case d: FromStore.Duo[_]    => p.toFile.gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
             case e: FromStore.Empty[_]  => e()
           }
         }
@@ -194,6 +201,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             fv.visitOther(ext, f, Files.getLastModifiedTime(p)) match {
               case b: FromStore.Binary[_] => b(p.toFile.gulp.?)
               case t: FromStore.Text[_]   => t(p.toFile.slurp.?)
+              case d: FromStore.Duo[_]    => p.toFile.gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))
               case e: FromStore.Empty[_]  => e()
             }
           }
@@ -519,6 +527,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
             if (fileSet contains ze.getName) acceptor(ze.getName) match {
               case fb: FromStore.Binary[Unit]  => fb(zf.getInputStream(ze).gulp.?)
               case ft: FromStore.Text[Unit]    => ft(zf.getInputStream(ze).slurp.?)
+              case fd: FromStore.Duo[Unit]     => zf.getInputStream(ze).gulp.? pipe (b => fd((new String(b)).linesIterator.toVector, b))
               case fe: FromStore.Empty[Unit]   => fe()
             }
           }
@@ -530,6 +539,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
               val vb = Vector.newBuilder[String]
               Files.lines(who resolve file).forEach(vb += _)
               ft(vb.result)
+            case fd: FromStore.Duo[Unit]    => Files.readAllBytes(who resolve file) pipe (b => fd((new String(b)).linesIterator.toVector, b))
             case fe: FromStore.Empty[Unit]  => fe()
           }
         }}

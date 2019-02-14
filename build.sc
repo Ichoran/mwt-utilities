@@ -9,17 +9,17 @@ trait Common extends ScalaModule {
     T{ Seq("-unchecked", "-feature", "-deprecation", "-opt:l:method" )}
 
   def repositories() = super.repositories ++ Seq(
-    coursier.maven.MavenRepository("https://oss.sonatype.org/content/repositories/snapshots")
+    //coursier.maven.MavenRepository("https://oss.sonatype.org/content/repositories/snapshots")
   )
 
   def ivyDeps = Agg(
     ivy"com.twelvemonkeys.imageio:imageio-tiff:3.4.1",
-    ivy"com.github.ichoran::kse:0.8-SNAPSHOT"
+    ivy"com.github.ichoran::kse:0.8.0"
   )
 }
 
 object mwt_utilities extends Common with PublishModule {
-  def publishVersion = "0.1.0-SNAPSHOT"
+  def publishVersion = "0.2.0"
   def pomSettings = PomSettings(
     description = "Utilities to help Scala read data from MWT output",
     organization = "com.github.ichoran",
