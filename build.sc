@@ -19,7 +19,7 @@ trait Common extends ScalaModule {
 }
 
 object mwt_utilities extends Common with PublishModule {
-  def publishVersion = "0.2.0"
+  def publishVersion = "0.2.0-SNAPSHOT"
   def pomSettings = PomSettings(
     description = "Utilities to help Scala read data from MWT output",
     organization = "com.github.ichoran",
