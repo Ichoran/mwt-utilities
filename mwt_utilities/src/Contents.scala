@@ -852,7 +852,7 @@ object Contents {
 
   object Implicits {
     implicit class FilesKnowAboutMWT(file: File) {
-      def namedLikeMwtTaget: Boolean = {
+      def namedLikeMwtTarget: Boolean = {
         val parts = file.base.split('_')
         parts.length >= 2 &&
         parts(parts.length-2).fn{ s =>
