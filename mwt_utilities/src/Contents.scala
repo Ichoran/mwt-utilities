@@ -131,7 +131,7 @@ case class Contents[A](who: Path, target: OutputTarget, baseString: String, base
         }
         if (fv.requestImages) {
           izes.foreach{ ize =>
-            fv.visitBlobData(ize.getName, ize.getLastModifiedTime) match {
+            fv.visitImage(ize.getName, ize.getLastModifiedTime) match {
               case b: FromStore.Binary[_] => b(zf.getInputStream(ize).gulp.?)
               case t: FromStore.Text[_]   => t(zf.getInputStream(ize).slurp.?)
               case d: FromStore.Duo[_]    => zf.getInputStream(ize).gulp.? pipe (b => d((new String(b)).linesIterator.toVector, b))

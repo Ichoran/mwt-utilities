@@ -128,7 +128,7 @@ object FromStore {
         while (ei < empties.length || bi < binaries.length) {
           val zi =
             if (bi >= binaries.length)                 { ei += 1; empties( ei-1)._1.apply(Stored.Empty) }
-            else if (ei >= binaries.length)            { bi += 1; binaries(bi-1)._1.apply(bin) }
+            else if (ei >= empties.length)             { bi += 1; binaries(bi-1)._1.apply(bin) }
             else if (empties(ei)._2 < binaries(bi)._2) { ei += 1; empties( ei-1)._1.apply(Stored.Empty) }
             else                                       { bi += 1; binaries(bi-1)._1.apply(bin) }
           z = Some(z match {

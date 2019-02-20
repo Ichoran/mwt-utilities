@@ -63,8 +63,10 @@ abstract class ContentTransformer[A] {
 
   /** This is called on each image file to get a transformer from old to new image contents.
     * Image files can be deleted a `None` is produced by the `FromStore`.
+    * 
+    * The return string specifies the new filename extension (if any).
     */
-  def image(name: String): FromStore.Binary[Option[Stored.Binary]] = FromStore.Binary(x => Some(x))
+  def image(name: String): FromStore.Binary[Option[(String, Stored.Binary)]] = FromStore.Binary(x => Some((name.file.ext, x)))
 
   /** This is called after all existing image files have been seen.  The iterator can create new
     * image files.
@@ -89,6 +91,24 @@ object ContentTransformer {
 
   /** Copies existing files without changes */
   def default[A]: ContentTransformer[A] = new Default[A]()
+
+
+  trait TiffToPng[A] extends ContentTransformer[A] {
+    override def image(name: String): FromStore.Binary[Option[(String, Stored.Binary)]] = {
+      val sup = super.image(name)
+      FromStore.Binary(bin => {
+        sup(bin) match {
+          case Some((ext, b)) if ext.equalsIgnoreCase("tiff") || ext.equalsIgnoreCase("tif") =>
+            val pixels = ImageDecoder.tiffDecoder.decode(b.data).yesOr(e => throw new IOException(s"Couldn't decode tiff $name\n$e"))
+            val baos = new ByteArrayOutputStream();
+            val worked = javax.imageio.ImageIO.write(pixels, "png", baos)
+            if (!worked) throw new IOException(s"Couldn't write content of $name into png")
+            Some(("png", Stored.Binary(baos.toByteArray)))
+          case x => x
+        }
+      })
+    }
+  }
 
 
   class Clean[A](val target: Path, val minMove: Double, val minTime: Double, val minFrames: Int = Summary.goodBlobN)
@@ -126,6 +146,10 @@ object ContentTransformer {
   /** Cleans up existing files without losing much */
   def clean[A](target: Path, minMove: Double, minTime: Double, minFrames: Int = Summary.goodBlobN) =
     new Clean[A](target, minMove, minTime, minFrames)
+
+  /** Cleans and converts tiffs to PNGs */
+  def nice[A](target: Path, minMove: Double, minTime: Double, minFrames: Int = Summary.goodBlobN) =
+    new Clean[A](target, minMove, minTime, minFrames) with TiffToPng[A] {}
 }
 
 
@@ -242,12 +266,25 @@ object CopyTransform {
 
       ///// Start of MyVisitor
       abstract class MyVisitor extends FilesVisitor {
-        override def requestImages = someDataToWrite.exists(_ == true)
-        override def visitImage(name: String, modified: FileTime) = FromStore.broadcast(
-          ctsi.collect{ case (ct, ix) if someDataToWrite(ix) =>
-            ct.image(name).branch(_.toOk.swap.toEither, bincopy(ix, name, modified))
-          }
-        )
+        override def requestImages = {
+          val ans = someDataToWrite.exists(_ == true)
+          ans
+        }
+        override def visitImage(name: String, modified: FileTime) = {
+          FromStore.broadcast(
+            ctsi.collect{ case (ct, ix) if someDataToWrite(ix) =>
+              val imf = ct.image(name)
+              FromStore.Binary{ bin =>
+                imf(bin) match {
+                  case Some((e, b)) =>
+                    val copier = bincopy(ix, (name.file % e).toString, modified)
+                    copier(b)
+                  case _ => ()
+                }
+              }
+            }
+          )
+        }
         override def noMoreImages() {
           for ((ct, ix) <- ctsi if someDataToWrite(ix)) {
             ct.extraImages().foreach{ case (name, bin) => bincopy(ix, name, FileTime from Instant.now).apply(bin) }            
