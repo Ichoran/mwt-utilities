@@ -62,7 +62,7 @@ abstract class ContentTransformer[A] {
   def summary(): Option[FromStore.Text.Transform] = None
 
   /** This is called on each image file to get a transformer from old to new image contents.
-    * Image files can be deleted a `None` is produced by the `FromStore`.
+    * Image files will be deleted if a `None` is produced by the `FromStore`.
     * 
     * The return string specifies the new filename extension (if any).
     */
@@ -111,6 +111,11 @@ object ContentTransformer {
   }
 
 
+  trait NoTiffs[A] extends ContentTransformer[A] {
+    override def image(name: String): FromStore.Binary[Option[(String, Stored.Binary)]] = FromStore.Binary(x => None)
+  }
+
+
   class Clean[A](val target: Path, val minMove: Double, val minTime: Double, val minFrames: Int = Summary.goodBlobN)
   extends ContentTransformer[A] {
     private def movedEnough(b: Blob): Boolean = {
@@ -150,6 +155,10 @@ object ContentTransformer {
   /** Cleans and converts tiffs to PNGs */
   def nice[A](target: Path, minMove: Double, minTime: Double, minFrames: Int = Summary.goodBlobN) =
     new Clean[A](target, minMove, minTime, minFrames) with TiffToPng[A] {}
+
+  /** Cleans and removes images */
+  def bare[A](target: Path, minMove: Double, minTime: Double, minFrames: Int = Summary.goodBlobN) =
+    new Clean[A](target, minMove, minTime, minFrames) with NoTiffs[A] {}
 }
 
 

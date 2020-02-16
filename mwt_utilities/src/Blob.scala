@@ -137,6 +137,50 @@ object Blob extends TimedListCompanion {
       myWiggle
     }
 
+    def skeleton: Option[(Array[Short], Array[Short])] =
+      if (nSkel <= 0) None
+      else {
+        val xs, ys = new Array[Short](nSkel)
+        var i = 0
+        while (i < xs.length) {
+          val ss = data(i).asShorts
+          xs(i) = ss.s0
+          ys(i) = ss.s1
+          i += 1
+        }
+        Some((xs, ys))
+      }
+
+    def outline: Option[(Array[Short], Array[Short])] =
+      if (nOut <= 0) None
+      else {
+        val xs, ys = new Array[Short](1 + nOut)
+        var j = 0
+        var x = ox.toInt
+        var y = oy.toInt
+        xs(j) = x.toShort
+        ys(j) = y.toShort
+        j += 1
+        while (j < xs.length) {
+          var bits = data(nSkel + (j >>> 4))
+          var i = 16 min (nOut - (j-1))
+          while (i > 0) {
+            (bits & 0x3) match {
+              case 0 => x -= 1
+              case 1 => x += 1
+              case 2 => y -= 1
+              case _ => y += 1
+            }
+            xs(j) = x.toShort
+            ys(j) = y.toShort
+            j += 1
+            bits = bits >>> 2
+            i -= 1
+          }
+        }
+        Some((xs, ys))
+      }
+
     override def equals(that: Any): Boolean = that match {
       case e: Entry =>
         c4(t, e.t) && c4(cx, e.cx) && c4(cy, e.cy) && area == e.area &&
