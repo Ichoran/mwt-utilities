@@ -151,7 +151,7 @@ object Blob extends TimedListCompanion {
         Some((xs, ys))
       }
 
-    def outline: Option[(Array[Short], Array[Short])] =
+    def outline(close: Boolean = false): Option[(Array[Short], Array[Short])] =
       if (nOut <= 0) None
       else {
         val xs, ys = new Array[Short](1 + nOut)
@@ -178,7 +178,61 @@ object Blob extends TimedListCompanion {
             i -= 1
           }
         }
-        Some((xs, ys))
+        if (!close) Some((xs, ys))
+        else {
+          val gap = (xs(0) - xs(xs.length-1)).abs + (ys(0) - ys(ys.length-1)).abs
+          if (gap <= 1) Some((xs, ys))
+          else {
+            val nxs = java.util.Arrays.copyOf(xs, xs.length + gap - 1)
+            val nys = java.util.Arrays.copyOf(ys, ys.length + gap - 1)
+            val x0 = xs(0)
+            val y0 = ys(0)
+            var i = xs.length
+            while (i < nxs.length) {
+              val xi = nxs(i-1)
+              val yi = nys(i-1)
+              val gapx = x0 - xi
+              val gapy = y0 - yi
+              val agapx = gapx.abs
+              val agapy = gapy.abs
+              val xk = xi + (if (gapx > 0) 1 else -1)
+              val yk = yi + (if (gapy > 0) 1 else -1)
+              if (agapx < agapy) { 
+                nxs(i) = xi
+                nys(i) = yk.toShort
+              }
+              else if (agapx > agapy) {
+                nxs(i) = xk.toShort
+                nys(i) = yi
+              }
+              else {
+                val xsq = (xi - xk).sq
+                val ysq = (yi - yk).sq
+                var decision = 0
+                var j = 1
+                while (decision == 0 && j < xs.length) {
+                  val xj = xs(j)
+                  val yj = ys(j)
+                  val dsqA = xsq + (yj - yk).sq
+                  val dsqB = (xj - xk).sq + ysq
+                  if (dsqA > dsqB) decision = 1
+                  else if (dsqA < dsqB) decision = -1
+                  j += 1
+                }
+                if (decision > 0) {
+                  nxs(i) = xi
+                  nxs(j) = yk.toShort
+                }
+                else {
+                  nxs(i) = xk.toShort
+                  nys(i) = yi
+                }
+              }
+              i += 1
+            }
+            Some((nxs, nys))
+          }
+        }
       }
 
     override def equals(that: Any): Boolean = that match {
