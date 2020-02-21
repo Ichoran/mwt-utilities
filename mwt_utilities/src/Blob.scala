@@ -148,7 +148,7 @@ object Blob extends TimedListCompanion {
           }
           if (decision > 0) {
             nxs(i) = xi
-            nxs(j) = yk.toShort
+            nys(i) = yk.toShort
           }
           else {
             nxs(i) = xk.toShort
