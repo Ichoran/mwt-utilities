@@ -97,6 +97,159 @@ object Blob extends TimedListCompanion {
   type MyElement = Entry
   type MyTimed = Blob
 
+  case class Mask(x0: Int, x1: Int, y0: Int, y1: Int, pixels: Array[Byte]) {}
+  object Mask {
+    def isMaskable(xs: Array[Short], ys: Array[Short]): Boolean =
+      if (xs.length < 1 || ys.length < 1) false
+      else if (xs.length != ys.length) false
+      else (xs(0) - xs(xs.length-1)).abs + (ys(0) - ys(ys.length-1)).abs < 2
+    def isMaskable(outline: (Array[Short], Array[Short])): Boolean = isMaskable(outline._1, outline._2)
+
+    def maskableOutlineFrom(xs: Array[Short], ys: Array[Short]): Option[(Array[Short], Array[Short])] = {
+      if (xs.length < 1 || ys.length < 1) return None
+      val len = xs.length min ys.length
+      val gap = (xs(0) - xs(len-1)).abs + (ys(0) - ys(len-1)).abs
+      if (xs.length == ys.length && gap < 2) return Some((xs, ys))
+      val nxs = java.util.Arrays.copyOf(xs, xs.length + gap - 1)
+      val nys = java.util.Arrays.copyOf(ys, ys.length + gap - 1)
+      val x0 = xs(0)
+      val y0 = ys(0)
+      var i = xs.length
+      while (i < nxs.length) {
+        val xi = nxs(i-1)
+        val yi = nys(i-1)
+        val gapx = x0 - xi
+        val gapy = y0 - yi
+        val agapx = gapx.abs
+        val agapy = gapy.abs
+        val xk = xi + (if (gapx > 0) 1 else -1)
+        val yk = yi + (if (gapy > 0) 1 else -1)
+        if (agapx < agapy) { 
+          nxs(i) = xi
+          nys(i) = yk.toShort
+        }
+        else if (agapx > agapy) {
+          nxs(i) = xk.toShort
+          nys(i) = yi
+        }
+        else {
+          val xsq = (xi - xk).sq
+          val ysq = (yi - yk).sq
+          var decision = 0
+          var j = 1
+          while (decision == 0 && j < xs.length) {
+            val xj = xs(j)
+            val yj = ys(j)
+            val dsqA = xsq + (yj - yk).sq
+            val dsqB = (xj - xk).sq + ysq
+            if (dsqA > dsqB) decision = 1
+            else if (dsqA < dsqB) decision = -1
+            j += 1
+          }
+          if (decision > 0) {
+            nxs(i) = xi
+            nxs(j) = yk.toShort
+          }
+          else {
+            nxs(i) = xk.toShort
+            nys(i) = yi
+          }
+        }
+        i += 1
+      }
+      Some((nxs, nys))
+    }
+    def maskableOutlineFrom(outline: (Array[Short], Array[Short])): Option[(Array[Short], Array[Short])] =
+      if (isMaskable(outline._1, outline._2)) Some(outline)
+      else maskableOutlineFrom(outline._1, outline._2)
+
+    private def floodZero(w: Int, pixels: Array[Byte], value: Byte) {
+      var work = new Array[Long](8)
+      work(0) = Shorts(0, 1, -1, 1).L
+      val h = pixels.length / w
+      var n = 1
+      while (n > 0) {
+        val wk = work(n-1).asShorts
+        n -= 1
+        val x0 = wk.s0.toInt
+        val xN = wk.s1.toInt
+        val y  = wk.s2 + wk.s3
+        var x  = x0.toInt
+        if (y >= 0 && y < h) {
+          while (pixels(x + w*y) != 0 && x < xN) x += 1
+          if (x < xN) {
+            var xx = x+1
+            if (x == x0) while (x > 0 && pixels(x-1 + w*y) == 0) x -= 1
+            while (xx < w && pixels(xx + w*y) == 0) xx += 1
+            val m = n + 1 + (if (x < x0-1) 1 else 0) + (if (xx > xN+1) 1 else 0)
+            if (work.length < m) work = java.util.Arrays.copyOf(work, 2*work.length)
+            if (x < x0-1) {
+              work(n) = Shorts(x.toShort, (x0-1).toShort, y.toShort, (-wk.s3).toShort).L
+              n += 1
+            }
+            if (xx > xN+1) {
+              work(n) = Shorts((xN+1).toShort, xx.toShort, y.toShort, (-wk.s3).toShort).L
+              n += 1
+            }
+            work(n) = Shorts(x.toShort, xx.toShort, y.toShort, wk.s3).L
+            n += 1
+            while (x < xx) { pixels(x + w*y) = value; x += 1 }
+          }
+        }
+      }
+    }
+
+    def fromOutline(outline: (Array[Short], Array[Short]), inverted: Boolean = false, transposed: Boolean = false): Option[Mask] = {
+      val (xs, ys) = {
+        val xy = maskableOutlineFrom(outline).?
+        if (transposed) (xy._2, xy._1)
+        else xy
+      }
+      val n = xs.length min ys.length
+      var x0, x1 = xs(0).toInt
+      var y0, y1 = ys(0).toInt
+      var i = 1
+      while (i < n) {
+        val xi = xs(i)
+        val yi = ys(i)
+        if (xi < x0) x0 = xi
+        else if (xi > x1) x1 = xi
+        if (yi < y0) y0 = yi
+        else if (yi > y1) y1 = yi
+        i += 1
+      }
+      x0 -= 1
+      x1 += 1
+      y0 -= 1
+      y1 += 1
+      val w = 1 + x1 - x0
+      val h = 1 + y1 - y0
+      val pixels = new Array[Byte](w*h)
+      i = 0
+      while (i < n) {
+        pixels(xs(i) - x0 + w*(ys(i) - y0)) = 1
+        i += 1
+      }
+      floodZero(w, pixels, 255.toByte)
+      if (inverted) {
+        i = 0
+        while (i < n) {
+          pixels(xs(i) - x0 + w*(ys(i) - y0)) = 0
+          i += 1
+        }        
+      }
+      else {
+        i = 0
+        while (i < pixels.length) {
+          val pi = pixels(i)
+          pixels(i) = if (pi == 255.toByte) 0 else 255.toByte
+          i += 1
+        }
+      }
+      Some(new Mask(x0, x1, y0, y1, pixels))
+    }
+  }
+
   class Entry(
     var frame: Int,
     val t: Double, 
@@ -179,61 +332,12 @@ object Blob extends TimedListCompanion {
           }
         }
         if (!close) Some((xs, ys))
-        else {
-          val gap = (xs(0) - xs(xs.length-1)).abs + (ys(0) - ys(ys.length-1)).abs
-          if (gap <= 1) Some((xs, ys))
-          else {
-            val nxs = java.util.Arrays.copyOf(xs, xs.length + gap - 1)
-            val nys = java.util.Arrays.copyOf(ys, ys.length + gap - 1)
-            val x0 = xs(0)
-            val y0 = ys(0)
-            var i = xs.length
-            while (i < nxs.length) {
-              val xi = nxs(i-1)
-              val yi = nys(i-1)
-              val gapx = x0 - xi
-              val gapy = y0 - yi
-              val agapx = gapx.abs
-              val agapy = gapy.abs
-              val xk = xi + (if (gapx > 0) 1 else -1)
-              val yk = yi + (if (gapy > 0) 1 else -1)
-              if (agapx < agapy) { 
-                nxs(i) = xi
-                nys(i) = yk.toShort
-              }
-              else if (agapx > agapy) {
-                nxs(i) = xk.toShort
-                nys(i) = yi
-              }
-              else {
-                val xsq = (xi - xk).sq
-                val ysq = (yi - yk).sq
-                var decision = 0
-                var j = 1
-                while (decision == 0 && j < xs.length) {
-                  val xj = xs(j)
-                  val yj = ys(j)
-                  val dsqA = xsq + (yj - yk).sq
-                  val dsqB = (xj - xk).sq + ysq
-                  if (dsqA > dsqB) decision = 1
-                  else if (dsqA < dsqB) decision = -1
-                  j += 1
-                }
-                if (decision > 0) {
-                  nxs(i) = xi
-                  nxs(j) = yk.toShort
-                }
-                else {
-                  nxs(i) = xk.toShort
-                  nys(i) = yi
-                }
-              }
-              i += 1
-            }
-            Some((nxs, nys))
-          }
-        }
+        else Mask.maskableOutlineFrom(xs, ys)
       }
+
+    def mask(inverted: Boolean = false, transposed: Boolean = false): Option[Mask] =
+      if (nOut <= 0) None
+      else outline(false).flatMap(o => Mask.fromOutline(o, inverted, transposed))
 
     override def equals(that: Any): Boolean = that match {
       case e: Entry =>
