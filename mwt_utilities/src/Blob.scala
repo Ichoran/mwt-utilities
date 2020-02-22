@@ -181,7 +181,7 @@ object Blob extends TimedListCompanion {
             var xx = x+1
             if (x == x0) while (x > 0 && pixels(x-1 + w*y) == 0) x -= 1
             while (xx < w && pixels(xx + w*y) == 0) xx += 1
-            val m = n + 1 + (if (x < x0-1) 1 else 0) + (if (xx > xN+1) 1 else 0)
+            val m = n + 1 + (if (x < x0-1) 1 else 0) + (if (xx > xN+1 || xx < xN-1) 1 else 0)
             if (work.length < m) work = java.util.Arrays.copyOf(work, 2*work.length)
             if (x < x0-1) {
               work(n) = Shorts(x.toShort, (x0-1).toShort, y.toShort, (-wk.s3).toShort).L
@@ -193,6 +193,10 @@ object Blob extends TimedListCompanion {
             }
             work(n) = Shorts(x.toShort, xx.toShort, y.toShort, wk.s3).L
             n += 1
+            if (xx < xN-1) {
+              work(n) = Shorts((xx+1).toShort, xN.toShort, wk.s2, wk.s3).L
+              n += 1
+            }
             while (x < xx) { pixels(x + w*y) = value; x += 1 }
           }
         }
